@@ -1,9 +1,8 @@
 # 机器人动力学参数辨识系统统一说明
 
-> 本文档用于统一整理 `doc/` 目录下与动力学建模、激励轨迹、数据采样、
-> 参数辨识、算法评估和调试经验相关的内容。阅读本文即可理解当前仓库的
-> 数学模型、工程链路和实现边界。旧文档建议保留为归档材料，后续以本文
-> 作为主说明文档维护。
+> 本文档用于整理动力学建模、激励轨迹、参数辨识、算法评估和调试经验，主要承担**数学与算法背景手册**的角色。
+>
+> 当前工程架构、数据字段真实来源和阶段状态以根目录 `AGENTS.md`、`doc/ARCHITECTURE.md` 和 `doc/PHASE1_BASELINE.md` 为准。本文若与当前代码或这些文档冲突，应视为历史描述并进行增量修正，不能作为当前实现的最高优先级 source of truth。
 
 本文重点整合了以下主题：
 
@@ -19,7 +18,7 @@
 
 ### 1.1 项目目标
 
-本项目是一个基于 **MuJoCo + 纯 C++ + CMake** 的机器人动力学参数辨识系统。
+本项目的仿真与离线辨识核心基于 **MuJoCo + C++ + CMake**，不依赖 ROS 中间层；Piper 真机后端另通过 Python bridge 调用硬件 SDK。
 其目标不是单独做轨迹跟踪，也不是单独做仿真，而是完成如下闭环：
 
 1. 生成安全且具有充分激励性的关节轨迹；
@@ -45,7 +44,7 @@
 
 ### 1.3 系统总流程
 
-当前分支的核心数据流如下：
+当前分支的核心数据流已经收敛为统一实验后端结构：
 
 ```text
 config/*.yaml
@@ -55,12 +54,20 @@ run_experiment
     |
     +--> ForceController
     |        |
-    |        +--> 生成激励轨迹、执行安全检查、输出关节力矩
+    |        +--> 生成激励轨迹、执行安全检查、输出 ControlCommand
     |
-    +--> PandaSimulator / Piper Simulator
+    +--> ExperimentBackend
              |
-             +--> MuJoCo 步进
-             +--> 记录 q, qd, qdd, tau
+             +--> SimulationBackend --> MuJoCo
+             |
+             +--> PiperHardwareBackend --> Python bridge --> Piper SDK
+             |
+             v
+       ExperimentState(q, qd, effort)
+             |
+             v
+       ExperimentRecorder
+             |
              v
         data/benchmark_data.csv
              |
@@ -70,18 +77,19 @@ run_experiment
              +--> 预处理
              +--> 构造观测矩阵 W
              +--> 求解参数
-             +--> 验证集评估
+             +--> hold-out 验证
              v
       results/identification.yaml
 ```
 
-从职责划分上看，系统可以拆成五层：
+从职责划分上看，系统可以拆成六层：
 
 1. **配置层**：实验配置、辨识配置、机器人模型路径；
-2. **轨迹层**：激励轨迹的生成与安全验证；
-3. **仿真层**：MuJoCo 中的状态推进与数据记录；
-4. **辨识层**：观测矩阵构造、参数求解、残差评估；
-5. **诊断层**：调试报告、模型比较、回归一致性检查。
+2. **轨迹/控制层**：激励轨迹生成、安全验证和控制命令计算；
+3. **执行后端层**：MuJoCo 仿真或 Piper 真机 bridge；
+4. **记录层**：共享 `ExperimentRecorder` 写出统一 CSV；
+5. **辨识层**：观测矩阵构造、参数求解、残差评估；
+6. **诊断层**：调试报告、模型比较、回归一致性检查。
 
 ---
 
@@ -152,15 +160,16 @@ $$
 time, q0..q(n-1), qd0..qd(n-1), [qdd0..qdd(n-1)], tau0..tau(n-1)
 ```
 
-当前仿真器会直接记录：
+当前统一 `run_experiment -> ExperimentRecorder` 链路的真实来源是：
 
-- `qpos`
-- `qvel`
-- `qacc`
-- `data->ctrl`
+- `q`：来自 `ExperimentState.position`；仿真时对应 MuJoCo `qpos`
+- `qd`：来自 `ExperimentState.velocity`；仿真时对应 MuJoCo `qvel`
+- `qdd`：`ExperimentRecorder` 对相邻 `state.velocity` 做一阶差分
+- CSV `tau`：来自 `ControlCommand.torque`
 
-因此当前项目里 `tau` 的含义是**写入执行器控制输入的力矩命令**，而不是
-MuJoCo 内部某个理想分解项的直接导出。
+MuJoCo simulator 内部确实能够访问 `qacc` 和 `qfrc_actuator`，但当前统一 recorder 并没有把这两者按原始物理来源直接写入 CSV。
+
+因此当前项目里 CSV `tau` 的含义应明确为 **command torque (`tau_cmd`)**，不能默认解释为真实测得关节力矩；CSV 中存在 `qdd` 列也不能作为“来自 MuJoCo qacc”的证据。
 
 ---
 
@@ -596,16 +605,15 @@ $q(t)$，流程为：
 
 ### 7.1 采样内容
 
-仿真器默认记录以下信号：
+统一实验入口当前记录以下信号：
 
 - 时间 `time`
 - 关节位置 `q`
 - 关节速度 `qd`
-- 关节加速度 `qdd`
-- 控制输入 `tau`
+- 关节加速度列 `qdd`
+- 控制输入列 `tau`
 
-这使得当前分支比真实机器人实验更有利于辨识，因为仿真环境能够直接给出
-`qacc`，不必完全依赖数值微分。
+但必须区分“环境可提供”与“当前 recorder 实际记录”：MuJoCo 可以直接提供 `qacc`，而当前统一 `ExperimentRecorder` 仍通过速度一阶差分生成 `qdd`。因此仿真理论上可以使用更高质量的 physics-engine acceleration，但当前主链路尚未利用这一优势。
 
 ### 7.2 若加速度缺失时的补全
 
@@ -636,13 +644,12 @@ $$
 
 ### 7.4 训练集与验证集
 
-当前主程序通常按时间顺序划分：
+当前 `identify` 按同一条 CSV 的时间顺序划分：
 
 - 训练集：前 80%
 - 验证集：后 20%
 
-训练集用于估计参数，验证集用于评估泛化误差。若直接在同一批数据上报告误差，
-则很容易高估模型质量。
+这属于 **same-run temporal hold-out validation**。它比直接报告训练误差更有意义，但仍不能替代独立激励轨迹验证。正式实验应使用辨识轨迹 A 估计参数，再使用独立轨迹 B 评价 torque prediction。
 
 ---
 
@@ -1002,11 +1009,11 @@ $$
 如果数据记录端、逆动力学端和回归矩阵端对 damping 的符号定义不一致，
 则辨识结果会出现“残差很小，但 damping 参数整体为负”的现象。
 
-### 11.4 `ctrl` 与“真实动力学力矩”不完全等价
+### 11.4 command torque 与“真实动力学力矩”不完全等价
 
-当前记录的是 `data->ctrl`，而不是 `qfrc_bias`、`qfrc_inverse` 或
-完整广义力分解项。因此辨识结果实际上在拟合一个“控制输入下的等效动力学”，
-而不一定是 MuJoCo 内部最纯粹的刚体逆动力学参数。
+当前统一 recorder 记录的是 `ControlCommand.torque`。在 simulation backend 中，这个命令随后被写入 MuJoCo actuator control，因此在当前简单 motor 配置下与 `data->ctrl` 紧密对应，但它仍不是 `qfrc_bias`、`qfrc_inverse`、`qfrc_actuator` 或完整广义力分解项的直接测量。
+
+因此辨识结果当前实际上是在拟合一个“控制命令下的等效动力学”数据集，不能未经验证就称为真实关节力矩辨识。
 
 ### 11.5 完整参数不等于最小参数
 
@@ -1031,7 +1038,11 @@ $$
 
 - `src/app/run_experiment.cpp`：实验总入口
 - `src/force_node/src/force_controller.cpp`：轨迹生成、控制与安全检查
-- `src/sim_com_node/src/panda_simulator.cpp`：MuJoCo 步进与 CSV 记录
+- `src/sim_com_node/src/panda_simulator.cpp`：MuJoCo 模型加载、状态读取与仿真步进
+- `src/app/experiment_backend.hpp`：统一实验后端接口
+- `src/app/simulation_backend.cpp`：MuJoCo backend 适配
+- `src/app/piper_hardware_backend.cpp`：Piper 真机 backend 与 Python bridge 通信
+- `src/app/experiment_recorder.cpp`：统一 CSV 记录
 - `src/identification/src/main.cpp`：离线辨识 CLI 主入口
 - `src/identification/src/identification.cpp`：预处理与求解流程
 - `src/identification/src/algorithms.cpp`：各类辨识算法

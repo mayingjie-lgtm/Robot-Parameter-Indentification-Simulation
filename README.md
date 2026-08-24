@@ -1,7 +1,6 @@
 # 机器人动力学参数辨识系统
 
-本分支是一个**纯 MuJoCo / 纯 CMake / 无 ROS** 的参数辨识实验版本，目标是在
-Windows 或 Linux 上直接构建并运行。
+本分支是一个**无 ROS 中间层**的机器人动力学参数辨识实验版本。仿真与离线辨识核心采用 **MuJoCo + C++ + CMake**；Piper 真机后端通过 Python bridge 调用 `piper_sdk`。项目目标是在 Linux/Windows 上运行仿真与离线辨识，并在支持的 Linux 真机环境中接入硬件实验。
 
 > **声明**：本项目参考了 [BIRDy (Benchmark for Identification of Robot Dynamics)](https://github.com/TUM-ICS/BIRDY) 开源项目。
 
@@ -41,17 +40,13 @@ cmake --build build --parallel
 
 默认会：
 
-- 读取 [experiment.yaml](/home/windiff/Code/Robot-Parameter-Indentification-Simulation/config/experiment.yaml)
-- 读取 [force_controller_node.yaml](/home/windiff/Code/Robot-Parameter-Indentification-Simulation/config/force_controller_node.yaml)
-- 读取 [panda_sim_node.yaml](/home/windiff/Code/Robot-Parameter-Indentification-Simulation/config/panda_sim_node.yaml)
-- 使用 [scene.xml](/home/windiff/Code/Robot-Parameter-Indentification-Simulation/franka_emika_panda/scene.xml)
+- 读取 [`config/experiment.yaml`](config/experiment.yaml)
+- 按机器人选择对应 controller config，例如 [`config/force_controller_node.yaml`](config/force_controller_node.yaml) 或 [`config/piper_force_controller_node.yaml`](config/piper_force_controller_node.yaml)
+- 读取 [`config/panda_sim_node.yaml`](config/panda_sim_node.yaml)
+- 按机器人选择对应 MuJoCo scene
 - 在 `data/benchmark_data.csv` 输出采样数据
 
-通过修改 [experiment.yaml](/home/windiff/Code/Robot-Parameter-Indentification-Simulation/config/experiment.yaml) 中的
-`robot` 和 `backend` 字段，可以在仿真后端和 Piper 真机后端之间切换。切到 `piper`
-且 `backend: sim` 时，会自动改用
-[piper_force_controller_node.yaml](/home/windiff/Code/Robot-Parameter-Indentification-Simulation/config/piper_force_controller_node.yaml)
-和 `piper` 对应的 MuJoCo 模型。
+通过修改 [`config/experiment.yaml`](config/experiment.yaml) 中的 `robot` 和 `backend` 字段，可以在仿真后端和 Piper 真机后端之间切换。切到 `piper` 且 `backend: sim` 时，会自动改用 [`config/piper_force_controller_node.yaml`](config/piper_force_controller_node.yaml) 和 `piper` 对应的 MuJoCo 模型。
 
 推荐的后端切换方式：
 
@@ -70,13 +65,15 @@ cmake --build build --parallel
 ./build/run_experiment --experiment-config config/experiment.yaml
 ```
 
+> **当前数据语义提醒（Phase 1）**：统一 `ExperimentRecorder` 当前将相邻 `state.velocity` 做差分写入 CSV `qdd`，并将 `command.torque` 写入 CSV `tau`。因此当前 CSV 的 `qdd` 不能直接称为 MuJoCo `qacc`，`tau` 也不能直接称为实际测得关节力矩。详细定义和目标数据契约见 [`doc/ARCHITECTURE.md`](doc/ARCHITECTURE.md)。
+
 ### 5. 运行参数辨识
 
 ```bash
 ./build/identify
 ```
 
-默认读取 [identification.yaml](/home/windiff/Code/Robot-Parameter-Indentification-Simulation/config/identification.yaml)。
+默认读取 [`config/identification.yaml`](config/identification.yaml)。
 其中 `robot` 字段可以在 `panda` 和 `piper` 之间切换，`identify` 会据此选择
 对应的自由度、动力学基准和回归矩阵构造方式。`panda` 使用 7 轴链路，
 `piper` 使用 6 轴链路。
@@ -101,10 +98,10 @@ cmake --build build --parallel
 
 使用前请先确认：
 
-- 已按 [piper_sdk/README(ZH).MD](/home/windiff/Code/Robot-Parameter-Indentification-Simulation/piper_sdk/README(ZH).MD) 准备 CAN 环境
-- 已安装 `python-can`
-- 已在 [experiment.yaml](/home/windiff/Code/Robot-Parameter-Indentification-Simulation/config/experiment.yaml) 中设置 `backend: piper_real`
-- 已检查 [config/piper_real_experiment.yaml](/home/windiff/Code/Robot-Parameter-Indentification-Simulation/config/piper_real_experiment.yaml) 中的 `control_mode`、软限位和初始位
+- Python 环境中能够正常 `import piper_sdk`，并已按所使用 Piper SDK 版本准备 CAN 环境（当前仓库本身不包含 `piper_sdk/` 源码目录）
+- 已安装真机 bridge 所需 Python 依赖，例如 `python-can`
+- 已在 [`config/experiment.yaml`](config/experiment.yaml) 中设置 `backend: piper_real`
+- 已检查 [`config/piper_real_experiment.yaml`](config/piper_real_experiment.yaml) 中的 `control_mode`、软限位和初始位
 
 默认配置使用 `excitation_trajectory`，会通过 MIT 接口执行 Fourier 激励轨迹，并记录与仿真相同结构的 `time / q / qd / qdd / tau`。
 
@@ -124,7 +121,7 @@ cmake --build build --parallel
 - `position_validation`：小幅关节位置轨迹验证
 - `state_only`：只连接与采样，不下发运动命令
 
-激励轨迹相关参数位于 [config/piper_real_experiment.yaml](/home/windiff/Code/Robot-Parameter-Indentification-Simulation/config/piper_real_experiment.yaml)：
+激励轨迹相关参数位于 [`config/piper_real_experiment.yaml`](config/piper_real_experiment.yaml)：
 
 - `trajectory_period`
 - `trajectory_harmonics`
@@ -148,12 +145,15 @@ cmake --build build --parallel
 
 ```text
 ├── franka_emika_panda/   # MuJoCo Panda 模型与资源
-├── src/app/              # 单进程实验入口
-├── src/sim_com_node/     # 纯 C++ MuJoCo 仿真器
-├── src/force_node/       # 纯 C++ 控制器、轨迹与碰撞检查
+├── piper/                # MuJoCo Piper 模型与资源
+├── src/app/              # 统一实验入口、backend 与 recorder
+├── src/sim_com_node/     # MuJoCo 仿真器
+├── src/force_node/       # C++ 控制器、轨迹与碰撞检查
 ├── src/identification/   # 离线参数辨识与诊断工具
+├── src/piper_real/       # Piper 真机 Python SDK adapter / bridge 逻辑
+├── tests/piper_real/     # Piper 真机后端单元测试
 ├── config/               # 运行配置
-└── doc/                  # 数学推导与实验说明
+└── doc/                  # 架构、baseline、数学与实验说明
 ```
 
 ---
@@ -199,13 +199,13 @@ run_experiment
 1. 后端返回当前关节状态。
 2. `ForceController` 根据当前时刻和关节状态计算统一控制命令。
 3. 后端执行一步仿真或一步真机命令下发。
-4. 共享记录器将 `q / qd / qdd / tau` 记录到 CSV，供后续辨识使用。
+4. 共享记录器将 `q / qd / qdd / tau` 记录到 CSV，供后续辨识使用；当前 `qdd` 来源为速度差分，`tau` 来源为 `command.torque`，后续将按架构文档逐步收口数据来源语义。
 
 ---
 
 ## 主要可执行文件
 
-- `run_experiment`：运行单进程 MuJoCo 闭环实验并生成 CSV
+- `run_experiment`：统一实验入口，可选择 MuJoCo 仿真或 Piper 真机 backend，并生成 CSV
 - `identify`：读取 CSV，执行单算法或完整 benchmark
   支持 `NLS_FRICTION` 非线性摩擦联合辨识（`--algorithm 8`）
 - `mujoco_identify`：快速执行一次 MuJoCo 回归辨识

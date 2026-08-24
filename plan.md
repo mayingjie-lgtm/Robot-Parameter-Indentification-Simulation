@@ -1,21 +1,27 @@
-# Piper 真机参数辨识接入计划
+# Piper 真机参数辨识接入计划（历史文档）
 
-> 目标：让 MuJoCo 仿真采集流程与 Piper 真机采集流程在“实验入口、激励轨迹、控制循环、采样时序、CSV 字段、辨识入口”六个层面保持完全对齐，只允许底层执行后端不同。
+> **STATUS: HISTORICAL / PARTIALLY IMPLEMENTED**
+>
+> 本文记录 Piper 真机接入阶段的历史设计计划。当前代码已经实现其中多项内容，包括 `ExperimentBackend`、`SimulationBackend`、`PiperHardwareBackend`、统一 `run_experiment` 主循环和共享 `ExperimentRecorder`。
+>
+> **不要把本文的“当前现状”“必须新增”等措辞当成现在的项目事实。** 当前架构以实际代码、根目录 `AGENTS.md` 和 `doc/ARCHITECTURE.md` 为准；本文仅用于追溯设计动机。
+>
+> 原始目标：让 MuJoCo 仿真采集流程与 Piper 真机采集流程在“实验入口、激励轨迹、控制循环、采样时序、CSV 字段、辨识入口”六个层面保持尽量对齐，只允许底层执行后端不同。
 
-## 1. 背景与当前现状
+## 1. 当时背景与现状（历史）
 
-当前仓库的实验主链路是：
+制定本文时，仓库的实验主链路是：
 
 `run_experiment -> ForceController -> PandaSimulator -> benchmark_data.csv -> identify`
 
 其中：
 
-- [src/app/run_experiment.cpp](/home/windiff/Code/Robot-Parameter-Indentification-Simulation/src/app/run_experiment.cpp) 负责读取配置并驱动主循环。
-- [src/force_node/src/force_controller.cpp](/home/windiff/Code/Robot-Parameter-Indentification-Simulation/src/force_node/src/force_controller.cpp) 负责激励轨迹、PD 跟踪和力矩限幅。
-- [src/sim_com_node/src/panda_simulator.cpp](/home/windiff/Code/Robot-Parameter-Indentification-Simulation/src/sim_com_node/src/panda_simulator.cpp) 负责 MuJoCo 步进和 CSV 记录。
-- [src/identification](/home/windiff/Code/Robot-Parameter-Indentification-Simulation/src/identification) 负责离线参数辨识。
+- [`src/app/run_experiment.cpp`](src/app/run_experiment.cpp) 负责读取配置并驱动主循环。
+- [`src/force_node/src/force_controller.cpp`](src/force_node/src/force_controller.cpp) 负责激励轨迹、PD 跟踪和力矩限幅。
+- [`src/sim_com_node/src/panda_simulator.cpp`](src/sim_com_node/src/panda_simulator.cpp) 负责 MuJoCo 步进和当时的仿真记录逻辑。
+- [`src/identification`](src/identification) 负责离线参数辨识。
 
-当前 `piper` 仅支持 MuJoCo 模型切换，不支持真实硬件通信和控制。
+制定本文时，`piper` 仅支持 MuJoCo 模型切换，尚未完成真实硬件通信和统一后端接入；**这一状态现在已经过时。**
 
 新增需求约束：
 
@@ -37,7 +43,7 @@
 
 ### 3.1 统一实验入口与统一实验状态机
 
-后续实现必须把现有 [run_experiment.cpp](/home/windiff/Code/Robot-Parameter-Indentification-Simulation/src/app/run_experiment.cpp) 抽象成统一实验状态机，而不是让仿真和真机分别维护不同入口。
+当时计划要求把 [`src/app/run_experiment.cpp`](src/app/run_experiment.cpp) 收敛为统一实验状态机，而不是让仿真和真机分别维护不同入口。当前代码已经实现了统一主循环和 backend 分支，具体状态以 `doc/ARCHITECTURE.md` 为准。
 
 统一状态机至少包含以下阶段：
 
@@ -142,7 +148,7 @@
 
 任务：
 
-1. 把当前实验主循环从 [run_experiment.cpp](/home/windiff/Code/Robot-Parameter-Indentification-Simulation/src/app/run_experiment.cpp) 中提炼为统一调度层
+1. 把当时实验主循环从 [`src/app/run_experiment.cpp`](src/app/run_experiment.cpp) 中提炼为统一调度层
 2. 抽象统一后端接口
 3. 把 MuJoCo 仿真器改造成 `SimulationBackend`
 4. 把 CSV 写出逻辑从仿真器内剥离成独立记录器
@@ -188,7 +194,7 @@
    - 饱和样本
    - 异常跳变样本
    - 通信中断样本
-6. 验证生成的 CSV 能被 [src/identification/src/main.cpp](/home/windiff/Code/Robot-Parameter-Indentification-Simulation/src/identification/src/main.cpp) 无分支读取
+6. 验证生成的 CSV 能被 [`src/identification/src/main.cpp`](src/identification/src/main.cpp) 无分支读取
 
 ### 阶段 E：统一入口与运行方式
 
@@ -204,9 +210,9 @@
 
 预计会涉及以下区域：
 
-- 重构 [src/app/run_experiment.cpp](/home/windiff/Code/Robot-Parameter-Indentification-Simulation/src/app/run_experiment.cpp) 或其周边调度逻辑
+- 重构 [`src/app/run_experiment.cpp`](src/app/run_experiment.cpp) 或其周边调度逻辑
 - 新增统一实验后端抽象
-- 拆分 [src/sim_com_node/src/panda_simulator.cpp](/home/windiff/Code/Robot-Parameter-Indentification-Simulation/src/sim_com_node/src/panda_simulator.cpp) 中的记录职责
+- 拆分 [`src/sim_com_node/src/panda_simulator.cpp`](src/sim_com_node/src/panda_simulator.cpp) 中的记录职责
 - 新增 Piper SDK 封装模块
 - 调整配置结构，支持统一入口切换后端
 - 更新 README，补充统一运行方式说明
