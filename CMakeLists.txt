@@ -246,3 +246,38 @@ target_link_libraries(rebot_phase5a_regressor_test
 target_compile_definitions(rebot_phase5a_regressor_test
   PRIVATE PROJECT_ROOT_DIR="${PROJECT_ROOT_DIR}"
 )
+
+add_executable(rebot_excitation_data_quality
+  src/identification/src/rebot_excitation_data_quality.cpp
+  src/identification/src/data_loader.cpp
+)
+target_include_directories(rebot_excitation_data_quality
+  PRIVATE
+    src/identification/include
+)
+target_link_libraries(rebot_excitation_data_quality
+  PRIVATE
+    rebot_pinocchio_dynamics
+)
+target_compile_definitions(rebot_excitation_data_quality
+  PRIVATE PROJECT_ROOT_DIR="${PROJECT_ROOT_DIR}"
+)
+
+add_executable(rebot_constraint_force_diagnostic
+  src/identification/src/rebot_constraint_force_diagnostic.cpp
+)
+target_include_directories(rebot_constraint_force_diagnostic
+  PRIVATE
+    src/force_node/include
+    src/sim_com_node/include
+    ${MUJOCO_INCLUDE_DIR}
+)
+target_link_libraries(rebot_constraint_force_diagnostic
+  PRIVATE
+    force_controller_core
+    panda_simulator_core
+    ${MUJOCO_LIB}
+)
+target_compile_definitions(rebot_constraint_force_diagnostic
+  PRIVATE PROJECT_ROOT_DIR="${PROJECT_ROOT_DIR}"
+)

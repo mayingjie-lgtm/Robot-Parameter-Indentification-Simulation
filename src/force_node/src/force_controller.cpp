@@ -331,10 +331,16 @@ bool ForceController::checkTrajectory(const trajectory::FourierTrajectory &traj)
   for (double t = 0.0; t <= trajectory_duration_; t += 0.1) {
     const auto point = traj.evaluate(t);
     const Eigen::VectorXd &q = point.q;
+    const Eigen::VectorXd &qd = point.qd;
 
     for (std::size_t i = 0; i < arm_dof_; ++i) {
       const double q_i = q(static_cast<Eigen::Index>(i));
       if (q_i < joint_lower_limits_[i] || q_i > joint_upper_limits_[i]) {
+        return false;
+      }
+      if (!config_.joint_velocity_safety_limits.empty() &&
+          std::abs(qd(static_cast<Eigen::Index>(i))) >
+              config_.joint_velocity_safety_limits[i]) {
         return false;
       }
       q_state[i] = q_i;

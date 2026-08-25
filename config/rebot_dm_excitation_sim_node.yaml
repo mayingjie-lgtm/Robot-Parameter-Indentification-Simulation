@@ -1,0 +1,16 @@
+# reBot-DM excitation simulation-only truth.
+# These values are synthetic test truth for excitation/data-quality validation;
+# they are NOT measured or claimed reBot hardware parameters.
+robot: "rebot_dm"
+dof: 6
+simulation_rate_hz: 1000.0
+enable_viewer: false
+initial_keyframe: "runtime_home"
+validate_unit_torque_actuators: true
+
+joint_armature: [0.020, 0.025, 0.018, 0.010, 0.008, 0.006]
+joint_damping: [0.040, 0.035, 0.030, 0.020, 0.015, 0.010]
+joint_frictionloss: [0.080, 0.070, 0.060, 0.040, 0.030, 0.020]
+
+model: "rebot_dm/rebot_dm_runtime.xml"
+scene: "rebot_dm/scene_runtime.xml"

@@ -1,0 +1,23 @@
+# reBot-DM Fourier excitation controller.
+# Piper Phase 3 gains are only an initial candidate and are accepted here only
+# after the actual reBot MuJoCo rollout passes the excitation safety gates.
+robot: "rebot_dm"
+controller_mode: "excitation_trajectory"
+control_rate_hz: 1000.0
+trajectory_duration: 30.0
+trajectory_harmonics: 5
+trajectory_seed: 20260826
+trajectory_coefficient_scale: 0.04
+
+kp: [110.0, 110.0, 90.0, 68.0, 52.0, 35.0]
+kd: [9.0, 9.0, 7.1, 5.6, 4.5, 3.5]
+target_position: [0.0, -1.0, -1.0, 0.0, 0.0, -0.6]
+
+# These values are checked against the canonical MuJoCo model at startup.
+joint_lower_limits: [-2.8, -3.14, -3.14, -1.87, -1.57, -3.14]
+joint_upper_limits: [2.8, 0.0, 0.0, 1.57, 1.57, 3.14]
+joint_torque_limits: [27.0, 27.0, 27.0, 7.0, 7.0, 7.0]
+
+# Reuse the existing conservative Phase 4B runtime safety envelope. Excitation
+# must be reduced rather than widening these limits.
+joint_velocity_safety_limits: [1.0, 1.0, 1.0, 1.5, 1.5, 1.5]
