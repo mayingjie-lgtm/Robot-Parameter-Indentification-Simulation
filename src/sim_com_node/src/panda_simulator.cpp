@@ -152,6 +152,9 @@ PandaSimConfig PandaSimulator::loadConfig(const std::filesystem::path &path) {
       config.simulation_rate_hz = *rate;
     } else if (const auto enable = parseYamlBool(trimmed, "enable_viewer")) {
       config.enable_viewer = *enable;
+    } else if (const auto validate =
+                   parseYamlBool(trimmed, "validate_unit_torque_actuators")) {
+      config.validate_unit_torque_actuators = *validate;
     } else if (const auto keyframe =
                    parseYamlString(trimmed, "initial_keyframe")) {
       config.initial_keyframe = *keyframe;
@@ -214,6 +217,26 @@ PandaSimulator::PandaSimulator(const PandaSimConfig &config,
   }
   if (recorded_dof_ == 0 || recorded_dof_ > joint_indices_.size()) {
     throw std::runtime_error("记录自由度配置非法，超出当前模型可用关节数");
+  }
+
+  if (config_.validate_unit_torque_actuators) {
+    if (static_cast<std::size_t>(model_->nu) != recorded_dof_) {
+      throw std::runtime_error("unit-torque gate 要求执行器数量严格等于控制自由度");
+    }
+    for (std::size_t index = 0; index < recorded_dof_; ++index) {
+      const int actuator = static_cast<int>(index);
+      if (model_->actuator_trntype[actuator] != mjTRN_JOINT ||
+          model_->actuator_trnid[2 * actuator] != joint_indices_[index]) {
+        throw std::runtime_error("unit-torque gate 检测到 actuator/joint 顺序不一致");
+      }
+      const mjtNum *gear = model_->actuator_gear + 6 * actuator;
+      if (std::abs(gear[0] - 1.0) > 1e-15 ||
+          std::abs(gear[1]) > 1e-15 || std::abs(gear[2]) > 1e-15 ||
+          std::abs(gear[3]) > 1e-15 || std::abs(gear[4]) > 1e-15 ||
+          std::abs(gear[5]) > 1e-15) {
+        throw std::runtime_error("unit-torque gate 要求 actuator gear=1");
+      }
+    }
   }
 
   if (!config_.joint_frictionloss.empty()) {
@@ -311,6 +334,25 @@ SimulationStepTruth PandaSimulator::step(const std::vector<double> &torques,
     truth.constraint_effort[i] = data_->qfrc_constraint[dof_index];
   }
   truth.contact_count = data_->ncon;
+  if (truth.contact_count > 0) {
+    std::cerr << "Unexpected MuJoCo contact at t=" << truth.time_begin
+              << " s, q=[";
+    for (std::size_t i = 0; i < recorded_dof_; ++i) {
+      if (i > 0) {
+        std::cerr << ", ";
+      }
+      std::cerr << truth.position[i];
+    }
+    std::cerr << "]" << std::endl;
+    for (int contact = 0; contact < data_->ncon; ++contact) {
+      const int geom1 = data_->contact[contact].geom1;
+      const int geom2 = data_->contact[contact].geom2;
+      const char *name1 = mj_id2name(model_.get(), mjOBJ_GEOM, geom1);
+      const char *name2 = mj_id2name(model_.get(), mjOBJ_GEOM, geom2);
+      std::cerr << "  " << (name1 ? name1 : "?") << " <-> "
+                << (name2 ? name2 : "?") << std::endl;
+    }
+  }
 
   if (recording_) {
     recordCurrentStep();

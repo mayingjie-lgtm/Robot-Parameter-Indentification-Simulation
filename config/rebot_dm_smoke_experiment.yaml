@@ -1,0 +1,8 @@
+# Phase 4B reBot-DM runtime/data-semantics smoke.
+# Static hold only; NOT Fourier excitation and NOT parameter identification.
+robot: "rebot_dm"
+backend: "sim"
+controller_config: "config/rebot_dm_force_controller_node.yaml"
+sim_config: "config/rebot_dm_sim_node.yaml"
+scene: "rebot_dm/scene_runtime.xml"
+collision_model: "rebot_dm/rebot_dm_runtime.xml"

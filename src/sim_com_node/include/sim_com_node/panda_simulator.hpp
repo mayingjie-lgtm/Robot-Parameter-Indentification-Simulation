@@ -19,6 +19,7 @@ namespace sim_com_node {
 struct PandaSimConfig {
   double simulation_rate_hz = 1000.0;
   bool enable_viewer = true;
+  bool validate_unit_torque_actuators = false;
   std::string initial_keyframe = "home";
   std::vector<double> joint_frictionloss;
 };

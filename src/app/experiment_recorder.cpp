@@ -213,11 +213,15 @@ void ExperimentRecorder::writeMetadata(
   metadata_file << "robot: \"" << metadata.robot << "\"\n";
   metadata_file << "backend: \"" << metadata.backend << "\"\n";
   metadata_file << "scene: \"" << metadata.scene.string() << "\"\n";
+  metadata_file << "model: \"" << metadata.model.string() << "\"\n";
   metadata_file << "controller_config: \""
                 << metadata.controller_config.string() << "\"\n";
   metadata_file << "simulation_config: \""
                 << metadata.simulation_config.string() << "\"\n";
+  metadata_file << "git_commit: \"" << metadata.git_commit << "\"\n";
   metadata_file << "time_step: " << metadata.time_step << "\n";
+  metadata_file << "controller_mode: \"" << metadata.controller_mode
+                << "\"\n";
   metadata_file << "trajectory_seed: " << metadata.trajectory_seed << "\n";
   metadata_file << "trajectory_harmonics: "
                 << metadata.trajectory_harmonics << "\n";
@@ -231,15 +235,21 @@ void ExperimentRecorder::writeMetadata(
                 << metadata.trajectory_output_file.string() << "\"\n";
   metadata_file << "trajectory_sha256: \"" << metadata.trajectory_sha256
                 << "\"\n";
-  metadata_file << "joint_frictionloss: [";
-  for (std::size_t joint = 0; joint < metadata.joint_frictionloss.size();
-       ++joint) {
-    if (joint > 0) {
-      metadata_file << ", ";
+  const auto write_array = [&metadata_file](const std::string &key,
+                                             const std::vector<double> &values) {
+    metadata_file << key << ": [";
+    for (std::size_t index = 0; index < values.size(); ++index) {
+      if (index > 0) {
+        metadata_file << ", ";
+      }
+      metadata_file << values[index];
     }
-    metadata_file << metadata.joint_frictionloss[joint];
-  }
-  metadata_file << "]\n";
+    metadata_file << "]\n";
+  };
+  write_array("gripper_lock_position", metadata.gripper_lock_position);
+  write_array("armature_truth", metadata.armature_truth);
+  write_array("damping_truth", metadata.damping_truth);
+  write_array("joint_frictionloss", metadata.joint_frictionloss);
   if (simulation_truth_schema_) {
     metadata_file << "q_source: \"mujoco_qpos_pre_integration\"\n";
     metadata_file << "qd_source: \"mujoco_qvel_pre_integration\"\n";

@@ -173,6 +173,15 @@ ExperimentConfig defaultExperimentConfigForRobot(const std::string &robot) {
     return config;
   }
 
+  if (robot == "rebot_dm") {
+    config.controller_config =
+        repoRoot() / "config" / "rebot_dm_force_controller_node.yaml";
+    config.scene_path = repoRoot() / "rebot_dm" / "scene_runtime.xml";
+    config.sim_config = repoRoot() / "config" / "rebot_dm_sim_node.yaml";
+    config.collision_model = repoRoot() / "rebot_dm" / "rebot_dm_runtime.xml";
+    return config;
+  }
+
   if (robot != "panda") {
     throw std::runtime_error("不支持的机械臂类型: " + robot);
   }
@@ -268,6 +277,10 @@ int main(int argc, char **argv) {
     const bool headless = hasFlag(argc, argv, "--headless");
 
     auto controller_config = force_node::ForceController::loadConfig(force_config);
+    if (!controller_config.robot.empty() &&
+        controller_config.robot != experiment_config.robot) {
+      throw std::runtime_error("controller config robot 与 experiment robot 不一致");
+    }
     if (const auto seed = readArgUnsigned(argc, argv, "--trajectory-seed")) {
       controller_config.trajectory_seed = *seed;
     }
@@ -275,8 +288,22 @@ int main(int argc, char **argv) {
       controller_config.trajectory_coefficients_file = trajectory_input;
     }
     force_node::ForceController controller(controller_config, collision_model);
-    controller.saveTrajectoryCoefficients(trajectory_output);
-    const std::string trajectory_sha256 = sha256File(trajectory_output);
+    if (experiment_config.robot == "rebot_dm") {
+      if (experiment_config.backend != "sim") {
+        throw std::runtime_error("rebot_dm Phase 4B 仅支持 sim 后端");
+      }
+      if (controller.armDOF() != 6) {
+        throw std::runtime_error("rebot_dm 必须严格控制 J1-J6 六个机械臂自由度");
+      }
+    }
+
+    std::string trajectory_sha256;
+    fs::path recorded_trajectory_output;
+    if (controller.usesExcitationTrajectory()) {
+      controller.saveTrajectoryCoefficients(trajectory_output);
+      trajectory_sha256 = sha256File(trajectory_output);
+      recorded_trajectory_output = trajectory_output;
+    }
     std::unique_ptr<app::ExperimentBackend> backend;
     std::vector<double> joint_frictionloss;
 
@@ -296,14 +323,29 @@ int main(int argc, char **argv) {
           sim_config_loaded, scene_path, controller.armDOF());
     }
 
+    std::vector<double> gripper_lock_position;
+    std::vector<double> armature_truth;
+    std::vector<double> damping_truth;
+    if (experiment_config.robot == "rebot_dm") {
+      gripper_lock_position = {0.05, 0.05};
+      armature_truth.assign(6, 0.0);
+      damping_truth.assign(6, 0.0);
+      if (joint_frictionloss != std::vector<double>(6, 0.0)) {
+        throw std::runtime_error(
+            "rebot_dm Phase 4B simulation truth 要求 frictionloss=[0,0,0,0,0,0]");
+      }
+    }
+
     app::ExperimentRecorder recorder(
         output_csv, controller.armDOF(), experiment_config.backend == "sim");
     recorder.writeMetadata(app::ExperimentMetadata{
         experiment_config.robot, experiment_config.backend, scene_path,
-        force_config, sim_config, backend->timeStep(), controller.trajectorySeed(),
+        collision_model, force_config, sim_config, PROJECT_GIT_COMMIT,
+        backend->timeStep(), controller.controllerMode(), controller.trajectorySeed(),
         controller.trajectoryHarmonics(), controller.acceptedTrajectoryScale(),
         controller.acceptedTrajectoryAttempt(), controller.trajectoryReplayFile(),
-        trajectory_output, trajectory_sha256, joint_frictionloss});
+        recorded_trajectory_output, trajectory_sha256, gripper_lock_position,
+        armature_truth, damping_truth, joint_frictionloss});
 
     const double end_time = controller.trajectoryDuration();
     auto state = backend->initialize();

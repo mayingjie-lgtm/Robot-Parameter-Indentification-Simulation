@@ -1,0 +1,111 @@
+<mujoco model="rebot_b601_dm_phase4a">
+  <compiler angle="radian" inertiafromgeom="false"/>
+  <option gravity="0 0 -9.81"/>
+
+  <!--
+    Phase 4A dynamics-only canonical model.
+    Source inertial tensors are kept in each URDF link frame via fullinertia.
+    Explicit simulation truth for J1-J6: armature=0, damping=0, frictionloss=0.
+    Visual/collision geometry is intentionally deferred to Phase 4B.
+  -->
+  <worldbody>
+    <body name="base_link">
+      <inertial pos="-2.70523135620574E-06 -7.70134319499296E-06 0.028980835090929"
+                mass="0.79874480798149"
+                quat="0.70710578819191972 -6.29009955605682e-05 4.4576443295645554e-05 0.70710776997703073"
+                diaginertia="0.0010041303961321908 0.0016792292765580733 0.0024399206482915558"/>
+      <body name="link1" pos="-8.416E-05 0 0.08465">
+        <inertial pos="1.20584908205569E-05 -0.00052246270024925 0.0197721792915801"
+                  mass="0.0840736498625263"
+                  quat="0.31826691347595154 0.63143195029587262 -0.63143349724000131 -0.31826341683470849"
+                  diaginertia="5.0888596863285472e-05 7.4327953693628798e-05 9.1451887494476729e-05"/>
+        <joint name="joint1" axis="0 0 1" range="-2.8 2.8" actuatorfrcrange="-27 27"
+               armature="0" damping="0" frictionloss="0"/>
+
+        <body name="link2" pos="0.020084 0.031625 0.05555" euler="-1.5708 0 0">
+          <inertial pos="-0.13224463371047 -0.00305031595315752 -0.0309299400248282"
+                    mass="0.710394385134637"
+                    quat="0.75332949458871412 -0.65764308287152351 0.00032807809499553849 -0.00037483158201306974"
+                    diaginertia="0.00025002495343954829 0.0018600176214474834 0.0018632809003258993"/>
+          <joint name="joint2" axis="0 0 -1" range="-3.14 0" actuatorfrcrange="-27 27"
+                 armature="0" damping="0" frictionloss="0"/>
+
+          <body name="link3" pos="-0.264 0 0">
+            <inertial pos="0.121507513231219 -0.0537568110789665 -0.0310861781010256"
+                      mass="0.524941641478664"
+                      quat="0.99960798012235752 -0.026954763838568891 -0.0017171091466801945 0.0073741655993027604"
+                      diaginertia="0.00015990721890410308 0.0012492769850249938 0.0012557099698612554"/>
+            <joint name="joint3" axis="0 0 1" range="-3.14 0" actuatorfrcrange="-27 27"
+                   armature="0" damping="0" frictionloss="0"/>
+
+            <body name="link4" pos="0.2426 -0.054 -0.001625">
+              <inertial pos="0.0612381846323297 -0.0515229512574568 -0.0303340352965348"
+                        mass="0.191139210973019"
+                        quat="0.70701467317411026 -0.69610790026466751 -0.087476540192629709 0.088948850591500539"
+                        diaginertia="6.894893948243204e-05 0.00010113796065565406 0.00011577310126447419"/>
+              <joint name="joint4" axis="0 0 1" range="-1.87 1.57" actuatorfrcrange="-7 7"
+                     armature="0" damping="0" frictionloss="0"/>
+
+              <body name="link5" pos="0.078308 -0.0375 -0.03" euler="-1.5708 0 0">
+                <inertial pos="-0.00504933072901427 1.74603011302099E-06 0.0387866303374511"
+                          mass="0.150004102113546"
+                          quat="0.54807806755808419 0.44719462326796644 -0.44933659956732491 -0.54564092686609511"
+                          diaginertia="5.1718654955224666e-05 5.3800293157527753e-05 6.848509813577062e-05"/>
+                <joint name="joint5" axis="0 0 1" range="-1.57 1.57" actuatorfrcrange="-7 7"
+                       armature="0" damping="0" frictionloss="0"/>
+
+                <body name="link6" pos="0.023692 0 0.04" euler="0 1.5708 0">
+                  <inertial pos="-1.76034430143801E-05 7.61449749622373E-09 0.00431722560895041"
+                            mass="0.0187271664583674"
+                            quat="0.70710589921268485 -1.3011870228424889e-05 -1.305571361966382e-05 0.70710766291906357"
+                            diaginertia="4.3771274674396573e-06 4.4280117147582145e-06 8.552496886634884e-06"/>
+                  <joint name="joint6" axis="0 0 1" range="-3.14 3.14" actuatorfrcrange="-7 7"
+                         armature="0" damping="0" frictionloss="0"/>
+
+                  <body name="gripper_link" pos="0 0 0.15971" euler="0 -1.5708 0">
+                    <inertial pos="-0.11400456131826 7.30809328589541E-05 -8.098254686284E-08"
+                              mass="0.181800159145243"
+                              quat="0.49958642528150282 0.49961504000493068 -0.50037388112602033 -0.50042401477367604"
+                              diaginertia="5.8508142684152297e-05 0.00020521353674824832 0.00023238627147926413"/>
+
+                    <body name="gripper_left" pos="-0.042091 2.7531E-05 -1.3031E-05" euler="0 0 -1.5708">
+                      <inertial pos="0.00937154605945142 -0.0183514409006279 -0.00213050813223617"
+                                mass="0.0423278952416158"
+                                quat="0.92219166680733022 -0.070162254522603343 -0.010048447640092537 0.38018260929643799"
+                                diaginertia="8.5548862838440899e-06 1.0839342746622605e-05 1.1377372612026584e-05"/>
+                      <joint name="gripper_joint1" type="slide" axis="1 0 0" range="0 0.0715"
+                             armature="0" damping="0" frictionloss="0"/>
+                    </body>
+
+                    <body name="gripper_right" pos="-0.042091 -2.7531E-05 1.3031E-05" euler="0 0 1.5708">
+                      <inertial pos="0.00937154599936671 0.0183514410059713 0.00213050822993754"
+                                mass="0.0423278949561274"
+                                quat="0.92219166525727958 -0.070162264866198309 0.010048457142864441 -0.38018261089626282"
+                                diaginertia="8.5548862204584816e-06 1.0839342686049004e-05 1.1377372586407632e-05"/>
+                      <joint name="gripper_joint2" type="slide" axis="1 0 0" range="0 0.0715"
+                             armature="0" damping="0" frictionloss="0"/>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <!-- Direct joint-torque semantics; actuator order is exactly J1 through J6. -->
+  <actuator>
+    <motor name="actuator1" joint="joint1" gear="1" ctrllimited="true" ctrlrange="-27 27"/>
+    <motor name="actuator2" joint="joint2" gear="1" ctrllimited="true" ctrlrange="-27 27"/>
+    <motor name="actuator3" joint="joint3" gear="1" ctrllimited="true" ctrlrange="-27 27"/>
+    <motor name="actuator4" joint="joint4" gear="1" ctrllimited="true" ctrlrange="-7 7"/>
+    <motor name="actuator5" joint="joint5" gear="1" ctrllimited="true" ctrlrange="-7 7"/>
+    <motor name="actuator6" joint="joint6" gear="1" ctrllimited="true" ctrlrange="-7 7"/>
+  </actuator>
+
+  <keyframe>
+    <key name="phase4a_home" qpos="0  -1.0  -1.0  0  0  0  0.05  0.05" ctrl="0 0 0 0 0 0"/>
+  </keyframe>
+</mujoco>

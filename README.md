@@ -17,8 +17,9 @@
 - Eigen3
 - CMake 3.21+
 - C++17 编译器
+- Pinocchio 4.x（reBot-DM dynamics / regressor；当前 Ubuntu 22.04 主机使用 `ros-humble-pinocchio`）
 
-如果 MuJoCo 未安装在系统默认路径，请设置环境变量 `MUJOCO_DIR`。
+如果 MuJoCo 未安装在系统默认路径，请设置环境变量 `MUJOCO_DIR`。使用 ROS Humble 提供的 Pinocchio 时，配置前先执行 `source /opt/ros/humble/setup.bash`，让 CMake 能找到 Pinocchio 及其依赖。
 
 ### 2. 配置项目
 
@@ -46,7 +47,7 @@ cmake --build build --parallel
 - 按机器人选择对应 MuJoCo scene
 - 在 `data/benchmark_data.csv` 输出采样数据
 
-通过修改 [`config/experiment.yaml`](config/experiment.yaml) 中的 `robot` 和 `backend` 字段，可以在仿真后端和 Piper 真机后端之间切换。切到 `piper` 且 `backend: sim` 时，会自动改用 [`config/piper_force_controller_node.yaml`](config/piper_force_controller_node.yaml) 和 `piper` 对应的 MuJoCo 模型。
+通过修改 [`config/experiment.yaml`](config/experiment.yaml) 中的 `robot` 和 `backend` 字段，可以在仿真后端和 Piper 真机后端之间切换。切到 `piper` 且 `backend: sim` 时，会自动改用 [`config/piper_force_controller_node.yaml`](config/piper_force_controller_node.yaml) 和 `piper` 对应的 MuJoCo 模型。Phase 4B 还增加了 `robot: rebot_dm` 的最小仿真分支与 [`config/rebot_dm_smoke_experiment.yaml`](config/rebot_dm_smoke_experiment.yaml) 静态保持 smoke；当前 runtime/data semantics 已验证，但 `rebot_dm/assets/` 下十个 accepted binary STL 尚未完成 repository-local vendoring，因此暂不能标记 Phase 4B PASS，详见 [`doc/PHASE4B_REBOT_RUNTIME_BASELINE.md`](doc/PHASE4B_REBOT_RUNTIME_BASELINE.md)。
 
 推荐的后端切换方式：
 
@@ -142,6 +143,7 @@ python3 scripts/verify_phase3_gates.py
 ```text
 ├── franka_emika_panda/   # MuJoCo Panda 模型与资源
 ├── piper/                # MuJoCo Piper 模型与资源
+├── rebot_dm/             # reBot-DM canonical dynamics + Phase 4B runtime scene/asset manifest
 ├── src/app/              # 统一实验入口、backend 与 recorder
 ├── src/sim_com_node/     # MuJoCo 仿真器
 ├── src/force_node/       # C++ 控制器、轨迹与碰撞检查
@@ -206,4 +208,6 @@ run_experiment
 - `mujoco_identify`：快速执行一次 MuJoCo 回归辨识
 - `dynamics_diagnostic`：对比动力学模型与记录数据
 - `model_comparison`：对比不同动力学模型
-- `regressor_test`：检查回归矩阵与 MuJoCo 动力学一致性
+- `regressor_test`：检查 Piper 回归矩阵与 MuJoCo 动力学一致性
+- `rebot_mujoco_model_sanity`：检查 reBot-DM canonical MJCF 的 J1–J6 mapping、六个 torque actuator、显式 simulation truth 与固定夹爪状态；可选读取外部源 MJCF 验证指定夹爪开度的 mesh 自碰撞
+- `rebot_model_consistency_test`：执行 reBot-DM MuJoCo↔Pinocchio joint mapping、gravity、`M(q)`、inverse dynamics 与 `Y*theta` 六项 Phase 4A 门禁；当前基线见 [`doc/PHASE4_REBOT_DM_MODEL_BASELINE.md`](doc/PHASE4_REBOT_DM_MODEL_BASELINE.md)

@@ -16,9 +16,12 @@ struct ExperimentMetadata {
   std::string robot;
   std::string backend;
   std::filesystem::path scene;
+  std::filesystem::path model;
   std::filesystem::path controller_config;
   std::filesystem::path simulation_config;
+  std::string git_commit;
   double time_step{0.0};
+  std::string controller_mode;
   std::uint32_t trajectory_seed{0};
   std::size_t trajectory_harmonics{0};
   double trajectory_coefficient_scale{0.0};
@@ -26,6 +29,9 @@ struct ExperimentMetadata {
   std::filesystem::path trajectory_replay_file;
   std::filesystem::path trajectory_output_file;
   std::string trajectory_sha256;
+  std::vector<double> gripper_lock_position;
+  std::vector<double> armature_truth;
+  std::vector<double> damping_truth;
   std::vector<double> joint_frictionloss;
 };
 

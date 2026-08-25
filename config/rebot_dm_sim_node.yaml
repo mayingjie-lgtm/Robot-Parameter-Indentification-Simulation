@@ -1,0 +1,14 @@
+# reBot-DM Phase 4B MuJoCo runtime smoke configuration.
+robot: "rebot_dm"
+dof: 6
+simulation_rate_hz: 1000.0
+enable_viewer: true
+initial_keyframe: "runtime_home"
+validate_unit_torque_actuators: true
+
+# Explicit Phase 4 simulation truth. These are not real-hardware parameters.
+joint_frictionloss: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+# Runtime model/scene are repository-relative and selected by experiment config.
+model: "rebot_dm/rebot_dm_runtime.xml"
+scene: "rebot_dm/scene_runtime.xml"

@@ -1,0 +1,15 @@
+<mujoco model="rebot_b601_dm_phase4b_scene">
+  <include file="rebot_dm_runtime.xml"/>
+
+  <!-- Fixed 0.05 m gripper state preserved from the Phase 4A geometry gate. -->
+  <equality>
+    <joint name="gripper_left_lock" joint1="gripper_joint1" polycoef="0.05 0 0 0 0"
+           solimp="0.9999 0.9999 0.001" solref="0.001 1"/>
+    <joint name="gripper_right_lock" joint1="gripper_joint2" polycoef="0.05 0 0 0 0"
+           solimp="0.9999 0.9999 0.001" solref="0.001 1"/>
+  </equality>
+
+  <keyframe>
+    <key name="runtime_home" qpos="0 -1.0 -1.0 0 0 -0.6 0.05 0.05" ctrl="0 0 0 0 0 0"/>
+  </keyframe>
+</mujoco>

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <iostream>
@@ -86,6 +87,26 @@ bool parseUnsigned(const std::string &line, const std::string &key,
   }
 }
 
+/** Parse a string scalar from the project's flat YAML subset. */
+bool parseString(const std::string &line, const std::string &key,
+                 std::string &out) {
+  const std::string trimmed = trim(line);
+  if (trimmed.rfind(key + ":", 0) != 0) {
+    return false;
+  }
+  std::string value = trim(removeComment(trimmed.substr(key.size() + 1)));
+  if (value.size() >= 2 &&
+      ((value.front() == '"' && value.back() == '"') ||
+       (value.front() == '\'' && value.back() == '\''))) {
+    value = value.substr(1, value.size() - 2);
+  }
+  if (value.empty()) {
+    return false;
+  }
+  out = std::move(value);
+  return true;
+}
+
 /** Parse an optional path scalar from the project's flat YAML subset. */
 bool parsePath(const std::string &line, const std::string &key,
                std::filesystem::path &out) {
@@ -121,6 +142,8 @@ ForceController::loadConfig(const std::filesystem::path &config_path) {
   std::string line;
   while (std::getline(file, line)) {
     std::uint64_t unsigned_value = 0;
+    parseString(line, "robot", config.robot);
+    parseString(line, "controller_mode", config.controller_mode);
     parseDouble(line, "control_rate_hz", config.control_rate_hz);
     parseDouble(line, "trajectory_duration", config.trajectory_duration);
     parseDouble(line, "trajectory_coefficient_scale",
@@ -136,6 +159,13 @@ ForceController::loadConfig(const std::filesystem::path &config_path) {
     parseDoubleArray(line, "kp", config.kp);
     parseDoubleArray(line, "kd", config.kd);
     parseDoubleArray(line, "target_position", config.target_position);
+    parseDoubleArray(line, "joint_lower_limits", config.joint_lower_limits);
+    parseDoubleArray(line, "joint_upper_limits", config.joint_upper_limits);
+    parseDoubleArray(line, "joint_velocity_safety_limits",
+                     config.joint_velocity_safety_limits);
+    parseDoubleArray(line, "joint_torque_limits", config.joint_torque_limits);
+    parseDoubleArray(line, "hold_feedforward_torque",
+                     config.hold_feedforward_torque);
   }
 
   return config;
@@ -162,7 +192,75 @@ ForceController::ForceController(const ForceControllerConfig &config,
   if (actuator_limits_.size() < arm_dof_) {
     throw std::runtime_error("碰撞模型中的执行器数量不足，无法匹配控制器维度");
   }
-  initExcitationTrajectory();
+
+  const auto validate_limit_vector = [this](const std::vector<double> &configured,
+                                             const std::vector<double> &model,
+                                             const std::string &name) {
+    if (configured.empty()) {
+      return;
+    }
+    if (configured.size() != arm_dof_) {
+      throw std::runtime_error(name + " 必须与机械臂自由度数量一致");
+    }
+    for (std::size_t joint = 0; joint < arm_dof_; ++joint) {
+      if (std::abs(configured[joint] - model[joint]) > 1e-12) {
+        throw std::runtime_error(name + " 与 MuJoCo 模型不一致");
+      }
+    }
+  };
+  validate_limit_vector(config_.joint_lower_limits, joint_lower_limits_,
+                        "joint_lower_limits");
+  validate_limit_vector(config_.joint_upper_limits, joint_upper_limits_,
+                        "joint_upper_limits");
+  validate_limit_vector(config_.joint_torque_limits, actuator_limits_,
+                        "joint_torque_limits");
+  if (!config_.joint_velocity_safety_limits.empty()) {
+    if (config_.joint_velocity_safety_limits.size() != arm_dof_) {
+      throw std::runtime_error(
+          "joint_velocity_safety_limits 必须与机械臂自由度数量一致");
+    }
+    for (const double limit : config_.joint_velocity_safety_limits) {
+      if (!std::isfinite(limit) || limit <= 0.0) {
+        throw std::runtime_error("joint_velocity_safety_limits 必须为有限正数");
+      }
+    }
+  }
+  if (!config_.hold_feedforward_torque.empty()) {
+    if (config_.hold_feedforward_torque.size() != arm_dof_) {
+      throw std::runtime_error("hold_feedforward_torque 必须与机械臂自由度数量一致");
+    }
+    for (std::size_t joint = 0; joint < arm_dof_; ++joint) {
+      const double torque = config_.hold_feedforward_torque[joint];
+      if (!std::isfinite(torque) || std::abs(torque) > actuator_limits_[joint]) {
+        throw std::runtime_error("hold_feedforward_torque 必须有限且不超过执行器力矩限位");
+      }
+    }
+  }
+
+  if (config_.controller_mode == "hold_position") {
+    mode_ = ControllerMode::HOLD_POSITION;
+    std::vector<double> q_state = collision_home_;
+    if (q_state.size() < arm_dof_) {
+      q_state.resize(arm_dof_, 0.0);
+    }
+    for (std::size_t joint = 0; joint < arm_dof_; ++joint) {
+      if (config_.target_position[joint] < joint_lower_limits_[joint] ||
+          config_.target_position[joint] > joint_upper_limits_[joint]) {
+        throw std::runtime_error("hold_position target 超出碰撞模型关节限位");
+      }
+      q_state[joint] = config_.target_position[joint];
+    }
+    if (collision_checker_.checkCollision(q_state)) {
+      collision_checker_.printCollisions();
+      throw std::runtime_error("hold_position target 在碰撞模型中存在接触");
+    }
+  } else if (config_.controller_mode == "excitation_trajectory") {
+    mode_ = ControllerMode::EXCITATION_TRAJECTORY;
+    initExcitationTrajectory();
+  } else {
+    throw std::runtime_error("不支持的 controller_mode: " +
+                             config_.controller_mode);
+  }
 }
 
 void ForceController::initExcitationTrajectory() {
@@ -256,6 +354,14 @@ ControlCommand ForceController::computeCommand(const JointSample &sample,
   if (sample.position.size() < arm_dof_ || sample.velocity.size() < arm_dof_) {
     throw std::runtime_error("关节状态维度不足，无法覆盖当前机械臂的控制关节");
   }
+  if (!config_.joint_velocity_safety_limits.empty()) {
+    for (std::size_t joint = 0; joint < arm_dof_; ++joint) {
+      if (std::abs(sample.velocity[joint]) >
+          config_.joint_velocity_safety_limits[joint]) {
+        throw std::runtime_error("关节速度超过 controller safety limit");
+      }
+    }
+  }
 
   ControlCommand command;
   command.torque.assign(actuator_limits_.size(), 0.0);
@@ -276,6 +382,9 @@ ControlCommand ForceController::computeCommand(const JointSample &sample,
       const double position_error = config_.target_position[i] - sample.position[i];
       command.torque[i] =
           config_.kp[i] * position_error - config_.kd[i] * sample.velocity[i];
+      if (!config_.hold_feedforward_torque.empty()) {
+        command.torque[i] += config_.hold_feedforward_torque[i];
+      }
     }
   } else {
     const double trajectory_time = current_time - trajectory_start_time_;
@@ -294,6 +403,9 @@ ControlCommand ForceController::computeCommand(const JointSample &sample,
             config_.target_position[i] - sample.position[i];
         command.torque[i] =
             config_.kp[i] * position_error - config_.kd[i] * sample.velocity[i];
+        if (!config_.hold_feedforward_torque.empty()) {
+          command.torque[i] += config_.hold_feedforward_torque[i];
+        }
       }
     } else {
       const auto point = trajectory_->evaluate(trajectory_time);

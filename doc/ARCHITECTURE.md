@@ -497,7 +497,11 @@ inverse dynamics implementation
 
 ---
 
-# 7. reBot 的未来接入位置
+# 7. reBot 的接入位置
+
+> 2026-08-25 Phase 4A 已完成：仓库已加入 `rebot_dm/` dynamics-only canonical URDF/MJCF、显式零 armature/damping/friction simulation truth、J1–J6 六个 direct torque actuator，以及最小 `ReBotPinocchioDynamics` wrapper。full URDF 先加载 8-DoF 模型，再把两个 gripper joint 固定在经源 mesh 验证无自碰撞的 `[0.05, 0.05] m`，得到 `nq=6,nv=6` reduced model。MuJoCo↔Pinocchio gravity、`M(q)`、inverse dynamics 与 rigid-body `Y*theta` 均达到约 `1e-15` 数值闭环，Phase 3 Piper gates 保持不变。详见 [`PHASE4_REBOT_DM_MODEL_BASELINE.md`](PHASE4_REBOT_DM_MODEL_BASELINE.md)。
+>
+> 2026-08-25 Phase 4B 已完成最小 `rebot_dm -> ForceController(hold_position) -> SimulationBackend -> MuJoCo -> ExperimentRecorder` 代码接入，并用 accepted 完整 mesh 验证 6DOF actuator mapping、无饱和/无意外 contact、`tau_cmd == qfrc_actuator` 和 Phase 3 CSV/metadata semantics。当前唯一 blocker 是十个 binary STL 尚未 physically vendored 到 `rebot_dm/assets/`，因此 Phase 4B 暂不能标 PASS；详见 [`PHASE4B_REBOT_RUNTIME_BASELINE.md`](PHASE4B_REBOT_RUNTIME_BASELINE.md)。
 
 目标结构：
 

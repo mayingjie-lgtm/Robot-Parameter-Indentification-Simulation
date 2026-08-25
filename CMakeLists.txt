@@ -22,6 +22,7 @@ find_package(Eigen3 REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(glfw3 REQUIRED)
 find_package(OpenMP)
+find_package(pinocchio REQUIRED)
 
 set(MUJOCO_DIR_ENV $ENV{MUJOCO_DIR})
 
@@ -49,6 +50,16 @@ if(NOT MUJOCO_INCLUDE_DIR OR NOT MUJOCO_LIB)
 endif()
 
 set(PROJECT_ROOT_DIR "${CMAKE_SOURCE_DIR}")
+execute_process(
+  COMMAND git rev-parse HEAD
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  OUTPUT_VARIABLE PROJECT_GIT_COMMIT
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  ERROR_QUIET
+)
+if(NOT PROJECT_GIT_COMMIT)
+  set(PROJECT_GIT_COMMIT "unknown")
+endif()
 
 add_library(force_controller_core
   src/force_node/src/force_controller.cpp
@@ -139,6 +150,9 @@ target_link_libraries(run_experiment
     panda_simulator_core
     OpenSSL::Crypto
 )
+target_compile_definitions(run_experiment
+  PRIVATE PROJECT_GIT_COMMIT="${PROJECT_GIT_COMMIT}"
+)
 
 add_executable(identify
   src/identification/src/main.cpp
@@ -171,3 +185,44 @@ add_executable(fourier_trajectory_test
 )
 target_link_libraries(fourier_trajectory_test PRIVATE force_controller_core)
 add_test(NAME fourier_trajectory_reproducibility COMMAND fourier_trajectory_test)
+
+add_library(rebot_pinocchio_dynamics
+  src/identification/src/robot/rebot_pinocchio_dynamics.cpp
+)
+target_include_directories(rebot_pinocchio_dynamics
+  PUBLIC
+    src/identification/include
+)
+target_link_libraries(rebot_pinocchio_dynamics
+  PUBLIC
+    Eigen3::Eigen
+    pinocchio::pinocchio
+)
+
+add_executable(rebot_mujoco_model_sanity
+  src/identification/src/rebot_mujoco_model_sanity.cpp
+)
+target_include_directories(rebot_mujoco_model_sanity PRIVATE ${MUJOCO_INCLUDE_DIR})
+target_link_libraries(rebot_mujoco_model_sanity PRIVATE ${MUJOCO_LIB})
+target_compile_definitions(rebot_mujoco_model_sanity
+  PRIVATE PROJECT_ROOT_DIR="${PROJECT_ROOT_DIR}"
+)
+add_test(NAME rebot_mujoco_model_sanity COMMAND rebot_mujoco_model_sanity)
+
+add_executable(rebot_model_consistency_test
+  src/identification/src/rebot_model_consistency_test.cpp
+)
+target_include_directories(rebot_model_consistency_test
+  PRIVATE
+    src/identification/include
+    ${MUJOCO_INCLUDE_DIR}
+)
+target_link_libraries(rebot_model_consistency_test
+  PRIVATE
+    rebot_pinocchio_dynamics
+    ${MUJOCO_LIB}
+)
+target_compile_definitions(rebot_model_consistency_test
+  PRIVATE PROJECT_ROOT_DIR="${PROJECT_ROOT_DIR}"
+)
+add_test(NAME rebot_model_consistency COMMAND rebot_model_consistency_test)

@@ -1,0 +1,25 @@
+# reBot-DM Phase 4B runtime smoke controller.
+# This is a static hold only; it is NOT an identification excitation.
+robot: "rebot_dm"
+controller_mode: "hold_position"
+control_rate_hz: 1000.0
+trajectory_duration: 0.5
+trajectory_harmonics: 0
+trajectory_seed: 0
+trajectory_coefficient_scale: 0.0
+
+# Deterministic static hold around the Phase 4A validated safe pose.
+# The feedforward values are the already-validated Phase 4A gravity torques at
+# q=[0,-1,-1,0,0,0]. They avoid adding online Pinocchio or a new dynamics path.
+kp: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+kd: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+target_position: [0.0, -1.0, -1.0, 0.0, 0.0, -0.6]
+hold_feedforward_torque: [-0.00000000032014213502407074, 0.6980324627106658, -2.7890575824450243, -0.6727350490695465, 0.000001642637889094074, -0.0001087908525960337]
+
+# These values are checked against the canonical MuJoCo model at startup.
+joint_lower_limits: [-2.8, -3.14, -3.14, -1.87, -1.57, -3.14]
+joint_upper_limits: [2.8, 0.0, 0.0, 1.57, 1.57, 3.14]
+joint_torque_limits: [27.0, 27.0, 27.0, 7.0, 7.0, 7.0]
+
+# Phase 4B smoke-only safety envelope; deliberately below source URDF maxima.
+joint_velocity_safety_limits: [1.0, 1.0, 1.0, 1.5, 1.5, 1.5]

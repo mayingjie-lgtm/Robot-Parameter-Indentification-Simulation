@@ -19,6 +19,8 @@ enum class ControllerMode {
 };
 
 struct ForceControllerConfig {
+  std::string robot;
+  std::string controller_mode = "excitation_trajectory";
   double control_rate_hz = 1000.0;
   double trajectory_duration = 30.0;
   std::size_t trajectory_harmonics = 5;
@@ -29,6 +31,11 @@ struct ForceControllerConfig {
   std::vector<double> kd = {35.0, 35.0, 35.0, 35.0, 20.0, 18.0, 10.0};
   std::vector<double> target_position = {0.0, 0.0, 0.0, -1.57079,
                                          0.0, 1.57079, -0.7853};
+  std::vector<double> joint_lower_limits;
+  std::vector<double> joint_upper_limits;
+  std::vector<double> joint_velocity_safety_limits;
+  std::vector<double> joint_torque_limits;
+  std::vector<double> hold_feedforward_torque;
 };
 
 struct JointSample {
@@ -63,6 +70,14 @@ public:
   bool isTrajectoryFinished() const { return trajectory_finished_; }
   bool isTorqueSaturated() const { return torque_saturated_; }
   double trajectoryDuration() const { return trajectory_duration_; }
+
+  /** Return true only when this controller instance uses Fourier excitation. */
+  bool usesExcitationTrajectory() const {
+    return mode_ == ControllerMode::EXCITATION_TRAJECTORY;
+  }
+
+  /** Return the configured controller mode for experiment provenance. */
+  const std::string &controllerMode() const { return config_.controller_mode; }
 
   /** Save the accepted or replayed Fourier coefficients to a CSV file. */
   void saveTrajectoryCoefficients(const std::filesystem::path &path) const;
