@@ -5,30 +5,35 @@
 #include "identification/data_loader.hpp"
 #include "mujoco_regressor.hpp"
 #include "mujoco_piper_regressor.hpp"
+#include "rebot_pinocchio_regressor.hpp"
 #include "robot/robot_model.hpp"
 #include <filesystem>
 #include <memory>
 #include <string>
 
 /**
- * @brief 参数辨识类（按机械臂切换对应的 MuJoCo 回归器）
+ * @brief 参数辨识类（按机械臂切换已验证的动力学回归器）
  *
- * 使用与 MuJoCo 一致的坐标系计算回归矩阵，
- * 确保辨识结果可以正确预测 MuJoCo 仿真的扭矩。
+ * Panda/Piper 使用既有 MuJoCo 回归器；reBot-DM 使用 Pinocchio 刚体
+ * regressor 加显式 actuator compensation 列，保持各自已验证的参数顺序。
  */
 class Identification {
 public:
   /**
    * @brief 构造函数
    *
-   * @param robot_type 机械臂类型，支持 "panda" / "piper"
-   * @param piper_model_path Piper mjModel source; empty uses the repository model
-   * @param piper_frictionloss Optional runtime dry-friction truth for six joints
+   * @param robot_type 机械臂类型，支持 "panda" / "piper" / "rebot_dm"
+   * @param model_path Robot model source; Piper expects MJCF, reBot expects URDF.
+   * @param frictionloss Optional six-joint dry-friction simulation truth.
+   * @param armature Optional six-joint reflected-inertia simulation truth.
+   * @param damping Optional six-joint viscous-damping simulation truth.
    * @param model 保留用于兼容性的机器人模型指针
    */
   explicit Identification(const std::string &robot_type = "panda",
-                          const std::filesystem::path &piper_model_path = {},
-                          const std::vector<double> &piper_frictionloss = {},
+                          const std::filesystem::path &model_path = {},
+                          const std::vector<double> &frictionloss = {},
+                          const std::vector<double> &armature = {},
+                          const std::vector<double> &damping = {},
                           std::unique_ptr<robot::RobotModel> model = nullptr);
 
   /**
@@ -41,11 +46,8 @@ public:
    *
    * @param data Experiment data
    * @param algorithm_type "OLS", "WLS", "IRLS", "TLS", "EKF", "ML", "CLOE"
-   * @param flags 动力学参数标志 (ARMATURE, DAMPING)
-   * @return Identified parameters beta (94 parameters)
-   *
-   * 参数向量 β 的结构:
-   *   [惯性参数 (10*8)] + [armature (7)] + [damping (7)] = 94 参数
+   * @param flags 动力学参数标志 (ARMATURE, DAMPING, FRICTION_LOSS)
+   * @return Identified base-parameter vector for the selected regressor.
    */
   Eigen::VectorXd solve(const ExperimentData &data,
                         const std::string &algorithm_type = "OLS",
@@ -88,6 +90,7 @@ private:
   std::string robot_type_;
   mujoco_dynamics::MuJoCoRegressor panda_regressor_;
   mujoco_dynamics::MuJoCoPiperRegressor piper_regressor_;
+  std::unique_ptr<rebot_dynamics::ReBotPinocchioRegressor> rebot_regressor_;
 };
 
 #endif // IDENTIFICATION_IDENTIFICATION_HPP_

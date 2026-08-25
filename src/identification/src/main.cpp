@@ -38,6 +38,8 @@ struct IdentificationConfig {
   double constraint_tolerance = 1e-10;
   double rank_relative_tolerance = 1e-6;
   double friction_velocity_threshold = 0.05;
+  std::vector<double> joint_armature;
+  std::vector<double> joint_damping;
   std::vector<double> joint_frictionloss;
 };
 
@@ -185,6 +187,8 @@ IdentificationConfig loadConfig(const fs::path &config_path) {
                 config.rank_relative_tolerance);
     parseDouble(line, "friction_velocity_threshold",
                 config.friction_velocity_threshold);
+    parseDoubleArray(line, "joint_armature", config.joint_armature);
+    parseDoubleArray(line, "joint_damping", config.joint_damping);
     parseDoubleArray(line, "joint_frictionloss", config.joint_frictionloss);
   }
   config.training_data_file = resolveRepoPath(config.training_data_file);
@@ -242,13 +246,13 @@ void applyArguments(int argc, char **argv, IdentificationConfig &config) {
 
 /** Return the controlled degrees of freedom for a supported robot. */
 std::size_t robotDof(const std::string &robot) {
-  if (robot == "piper") {
+  if (robot == "piper" || robot == "rebot_dm") {
     return 6;
   }
   if (robot == "panda") {
     return 7;
   }
-  throw std::runtime_error("robot 仅支持 piper 或 panda");
+  throw std::runtime_error("robot 仅支持 piper、rebot_dm 或 panda");
 }
 
 /** Keep only finite, unsaturated, contact-free, constraint-free samples. */
@@ -642,9 +646,16 @@ int main(int argc, char **argv) {
       throw std::runtime_error("可信闭环当前只允许 OLS(1) 或 IRLS(3)");
     }
     const bool friction_enabled = !config.joint_frictionloss.empty();
-    if (friction_enabled && config.joint_frictionloss.size() != dof) {
-      throw std::runtime_error("joint_frictionloss 数量必须等于机械臂自由度");
-    }
+    const auto validate_truth_size = [dof](const std::vector<double> &values,
+                                           const char *name) {
+      if (!values.empty() && values.size() != dof) {
+        throw std::runtime_error(std::string(name) +
+                                 " 数量必须等于机械臂自由度");
+      }
+    };
+    validate_truth_size(config.joint_armature, "joint_armature");
+    validate_truth_size(config.joint_damping, "joint_damping");
+    validate_truth_size(config.joint_frictionloss, "joint_frictionloss");
 
     ExperimentData raw_training = DataLoader::loadCSV(
         config.training_data_file.string(), dof, config.columns);
@@ -670,7 +681,8 @@ int main(int argc, char **argv) {
               << ", B excluded " << validation.excluded_samples << std::endl;
 
     Identification identifier(config.robot, config.model_file,
-                              config.joint_frictionloss);
+                              config.joint_frictionloss,
+                              config.joint_armature, config.joint_damping);
     const auto flags =
         friction_enabled
             ? mujoco_dynamics::MuJoCoParamFlags::ALL_WITH_FRICTION

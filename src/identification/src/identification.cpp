@@ -29,15 +29,28 @@ MuJoCoParamFlags effectiveFlagsForAlgorithm(const std::string &algorithm_type,
 } // namespace
 
 Identification::Identification(const std::string &robot_type,
-                               const std::filesystem::path &piper_model_path,
-                               const std::vector<double> &piper_frictionloss,
+                               const std::filesystem::path &model_path,
+                               const std::vector<double> &frictionloss,
+                               const std::vector<double> &armature,
+                               const std::vector<double> &damping,
                                std::unique_ptr<robot::RobotModel> model)
     : model_(std::move(model)), robot_type_(normalizeRobotType(robot_type)),
-      piper_regressor_(piper_model_path.empty()
-                            ? std::filesystem::path(PROJECT_ROOT_DIR) / "piper" /
-                                  "piper.xml"
-                            : piper_model_path,
-                        {0.035, -0.035}, piper_frictionloss) {}
+      piper_regressor_(
+          robot_type_ == "piper" && !model_path.empty()
+              ? model_path
+              : std::filesystem::path(PROJECT_ROOT_DIR) / "piper" / "piper.xml",
+          {0.035, -0.035}, robot_type_ == "piper" ? frictionloss
+                                                   : std::vector<double>{}) {
+  if (robot_type_ == "rebot_dm") {
+    const std::filesystem::path rebot_urdf =
+        model_path.empty()
+            ? std::filesystem::path(PROJECT_ROOT_DIR) / "rebot_dm" /
+                  "rebot_dm.urdf"
+            : model_path;
+    rebot_regressor_ = std::make_unique<rebot_dynamics::ReBotPinocchioRegressor>(
+        rebot_urdf, armature, damping, frictionloss);
+  }
+}
 
 void Identification::preprocess(ExperimentData &data) {
   if (data.qdd.rows() == static_cast<Eigen::Index>(data.n_samples) &&
@@ -81,6 +94,9 @@ std::size_t Identification::numParameters(MuJoCoParamFlags flags) const {
   if (robot_type_ == "piper") {
     return piper_regressor_.numParameters(flags);
   }
+  if (robot_type_ == "rebot_dm") {
+    return rebot_regressor_->numParameters(flags);
+  }
   return panda_regressor_.numParameters(flags);
 }
 
@@ -88,6 +104,9 @@ Eigen::VectorXd
 Identification::getGroundTruthParameters(MuJoCoParamFlags flags) const {
   if (robot_type_ == "piper") {
     return piper_regressor_.computeParameterVector(flags);
+  }
+  if (robot_type_ == "rebot_dm") {
+    return rebot_regressor_->computeParameterVector(flags);
   }
   return panda_regressor_.computeParameterVector(flags);
 }
@@ -97,6 +116,9 @@ Eigen::MatrixXd Identification::computeObservationMatrix(
     const Eigen::MatrixXd &Qdd, MuJoCoParamFlags flags) const {
   if (robot_type_ == "piper") {
     return piper_regressor_.computeObservationMatrix(Q, Qd, Qdd, flags);
+  }
+  if (robot_type_ == "rebot_dm") {
+    return rebot_regressor_->computeObservationMatrix(Q, Qd, Qdd, flags);
   }
   return panda_regressor_.computeObservationMatrix(Q, Qd, Qdd, flags);
 }
@@ -108,9 +130,12 @@ Eigen::VectorXd Identification::solve(const ExperimentData &data,
     throw std::runtime_error("Experiment data not preprocessed: qdd is empty");
   }
 
-  std::cout << "Building observation matrix W (using "
-            << (robot_type_ == "piper" ? "MuJoCoPiperRegressor"
-                                        : "MuJoCoRegressor")
+  const char *regressor_name =
+      robot_type_ == "piper"
+          ? "MuJoCoPiperRegressor"
+          : (robot_type_ == "rebot_dm" ? "ReBotPinocchioRegressor"
+                                         : "MuJoCoRegressor");
+  std::cout << "Building observation matrix W (using " << regressor_name
             << ")..." << std::endl;
 
   if (!data.q.allFinite() || !data.qd.allFinite() || !data.qdd.allFinite() ||

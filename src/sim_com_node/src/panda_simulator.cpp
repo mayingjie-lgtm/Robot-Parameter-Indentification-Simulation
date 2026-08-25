@@ -158,6 +158,12 @@ PandaSimConfig PandaSimulator::loadConfig(const std::filesystem::path &path) {
     } else if (const auto keyframe =
                    parseYamlString(trimmed, "initial_keyframe")) {
       config.initial_keyframe = *keyframe;
+    } else if (const auto armature =
+                   parseYamlDoubleArray(trimmed, "joint_armature")) {
+      config.joint_armature = *armature;
+    } else if (const auto damping =
+                   parseYamlDoubleArray(trimmed, "joint_damping")) {
+      config.joint_damping = *damping;
     } else if (const auto friction =
                    parseYamlDoubleArray(trimmed, "joint_frictionloss")) {
       config.joint_frictionloss = *friction;
@@ -239,23 +245,37 @@ PandaSimulator::PandaSimulator(const PandaSimConfig &config,
     }
   }
 
-  if (!config_.joint_frictionloss.empty()) {
-    if (config_.joint_frictionloss.size() != recorded_dof_) {
-      throw std::runtime_error(
-          "joint_frictionloss 必须与记录的机械臂自由度数量一致");
-    }
-    for (std::size_t joint = 0; joint < recorded_dof_; ++joint) {
-      const double friction = config_.joint_frictionloss[joint];
-      if (!std::isfinite(friction) || friction < 0.0) {
-        throw std::runtime_error("joint_frictionloss 必须为有限非负数");
-      }
-      const int dof_index = model_->jnt_dofadr[joint_indices_[joint]];
-      model_->dof_frictionloss[dof_index] = friction;
-      if (model_->dof_frictionloss[dof_index] != friction) {
-        throw std::runtime_error("MuJoCo dof_frictionloss 写入校验失败");
-      }
-    }
-  }
+  /** Apply one explicit six-joint simulation-truth vector and read it back. */
+  const auto apply_joint_truth =
+      [this](const std::vector<double> &values, const char *name,
+             mjtNum *target) {
+        if (values.empty()) {
+          return;
+        }
+        if (values.size() != recorded_dof_) {
+          throw std::runtime_error(std::string(name) +
+                                   " 必须与记录的机械臂自由度数量一致");
+        }
+        for (std::size_t joint = 0; joint < recorded_dof_; ++joint) {
+          const double value = values[joint];
+          if (!std::isfinite(value) || value < 0.0) {
+            throw std::runtime_error(std::string(name) +
+                                     " 必须为有限非负数");
+          }
+          const int dof_index = model_->jnt_dofadr[joint_indices_[joint]];
+          target[dof_index] = value;
+          if (target[dof_index] != value) {
+            throw std::runtime_error("MuJoCo " + std::string(name) +
+                                     " 写入校验失败");
+          }
+        }
+      };
+  apply_joint_truth(config_.joint_armature, "joint_armature",
+                    model_->dof_armature);
+  apply_joint_truth(config_.joint_damping, "joint_damping",
+                    model_->dof_damping);
+  apply_joint_truth(config_.joint_frictionloss, "joint_frictionloss",
+                    model_->dof_frictionloss);
 
   if (!record_file.empty()) {
     startDataRecording(record_file);

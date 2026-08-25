@@ -188,6 +188,7 @@ add_test(NAME fourier_trajectory_reproducibility COMMAND fourier_trajectory_test
 
 add_library(rebot_pinocchio_dynamics
   src/identification/src/robot/rebot_pinocchio_dynamics.cpp
+  src/identification/src/robot/rebot_pinocchio_regressor.cpp
 )
 target_include_directories(rebot_pinocchio_dynamics
   PUBLIC
@@ -198,6 +199,7 @@ target_link_libraries(rebot_pinocchio_dynamics
     Eigen3::Eigen
     pinocchio::pinocchio
 )
+target_link_libraries(identification_core PUBLIC rebot_pinocchio_dynamics)
 
 add_executable(rebot_mujoco_model_sanity
   src/identification/src/rebot_mujoco_model_sanity.cpp
@@ -226,3 +228,21 @@ target_compile_definitions(rebot_model_consistency_test
   PRIVATE PROJECT_ROOT_DIR="${PROJECT_ROOT_DIR}"
 )
 add_test(NAME rebot_model_consistency COMMAND rebot_model_consistency_test)
+
+add_executable(rebot_phase5a_regressor_test
+  src/identification/src/rebot_phase5a_regressor_test.cpp
+)
+target_include_directories(rebot_phase5a_regressor_test
+  PRIVATE
+    src/identification/include
+    ${MUJOCO_INCLUDE_DIR}
+)
+target_link_libraries(rebot_phase5a_regressor_test
+  PRIVATE
+    identification_core
+    rebot_pinocchio_dynamics
+    ${MUJOCO_LIB}
+)
+target_compile_definitions(rebot_phase5a_regressor_test
+  PRIVATE PROJECT_ROOT_DIR="${PROJECT_ROOT_DIR}"
+)

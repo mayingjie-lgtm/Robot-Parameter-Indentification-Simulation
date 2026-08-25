@@ -21,6 +21,8 @@ struct PandaSimConfig {
   bool enable_viewer = true;
   bool validate_unit_torque_actuators = false;
   std::string initial_keyframe = "home";
+  std::vector<double> joint_armature;
+  std::vector<double> joint_damping;
   std::vector<double> joint_frictionloss;
 };
 

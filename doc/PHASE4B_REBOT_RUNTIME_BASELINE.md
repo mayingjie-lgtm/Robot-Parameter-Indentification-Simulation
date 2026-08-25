@@ -3,7 +3,8 @@
 > Date: 2026-08-25
 > Phase 3 baseline commit: `785dd313d1429a9203ffa4b77bc4b78bb4a5a048`
 > Phase 4A status: **PASS**
-> Phase 4B status: **BLOCKED — repository-local binary STL assets are not yet vendored**
+> Phase 4B status: **PASS**
+> Phase 4B closure baseline commit: `1a58c901ad944adef4ebfb0a05911249e0ec6cb0`
 
 ## 1. Scope
 
@@ -86,17 +87,11 @@ file="gripper_right.STL"
 
 There is no `/home/...` or `package://...` runtime mesh reference in the repository runtime XML/configuration.
 
-### Blocking asset gate
+### Repository-local asset gate
 
-The ten accepted DM STL files are binary files and are **not yet physically present** under `rebot_dm/assets/`. `rebot_dm/assets/README.md` records all accepted source SHA-256 values so the byte-for-byte copy can be verified.
+The ten accepted DM STL files are physically present under `rebot_dm/assets/`. Their SHA-256 values were checked byte-for-byte against `rebot_dm/assets/README.md`; all ten match the accepted source manifest exactly.
 
-Therefore the canonical repository command currently stops with:
-
-```text
-Mujoco load error: Error opening file 'assets/base_link.STL'
-```
-
-This unresolved gate alone prevents declaring `PHASE 4B = PASS`.
+The canonical repository runtime therefore loads directly from repository-local assets with no external mesh dependency.
 
 ## 4. Collision model and safe runtime pose
 
@@ -261,7 +256,7 @@ This is the intended final command:
   --output data/phase4b/rebot_dm_repository_smoke.csv
 ```
 
-It is currently blocked only because the binary files under `rebot_dm/assets/` have not yet been vendored.
+The closure run used `/tmp/rebot_dm_repository_smoke.csv` as the output path and passed the canonical smoke verifier with 500 samples.
 
 ### 10.2 Complete-geometry validation used during implementation
 
@@ -473,51 +468,62 @@ It intentionally does not test identified parameters, regressor rank, or validat
 
 ## 18. CTest / Piper regression
 
-After the runtime changes, project compilation and the existing CTest suite continue to pass. The final Phase 4B closure must rerun these gates after the repository-local binary assets are physically present.
-
-Expected unchanged regression gate:
+After repository-local STL vendoring, the final Phase 4B closure reran the complete build and regression suite:
 
 ```text
 ctest: 4 / 4 PASS
+Phase 4A consistency: PASS
 Phase 3: clean=True gaussian=True outlier=True friction=True all=True
 ```
 
-## 19. Known limitations / blocker
+The canonical 500-sample smoke reported:
 
-1. The ten accepted binary STL files are not yet present under `rebot_dm/assets/`; this is the only current Phase 4B completion blocker.
-2. The complete-geometry runtime/data checks were performed against an untracked build-only mirror using the accepted external STL bytes. Those checks are evidence for geometry/runtime semantics, but they do not satisfy the repository-local asset requirement.
-3. The static hold feedforward is only a Phase 4B smoke command at one pose; it is not a controller-performance design and not an identified model.
-4. Phase 4B does not run reBot Fourier excitation or any identification solver.
-5. No reBot real backend or ROS path is added.
+```text
+rows = 500
+saturation_count = 0
+unexpected_contact_count = 0
+max_abs_J1_J6_constraint = 0 Nm
+global max_abs(tau_cmd - tau_effort) = 0 Nm
+```
+
+The source-gripper geometry check at `[0.05, 0.05] m` reported all three internal pair counts equal to zero.
+
+## 19. Known limitations
+
+1. The static hold feedforward is only a Phase 4B smoke command at one pose; it is not a controller-performance design and not an identified model.
+2. Phase 4B does not run reBot Fourier excitation or any identification solver.
+3. No reBot real backend or ROS path is added.
+4. `PROJECT_GIT_COMMIT` is configure-time metadata. After the closure reconfigure, the canonical smoke records `1a58c901ad944adef4ebfb0a05911249e0ec6cb0`, matching the Phase 4B closure baseline.
 
 ## 20. Phase status
 
 Current status:
 
 ```text
+[PASS] repository-local reBot binary STL assets physically present
+[PASS] all 10 STL SHA-256 values match the accepted manifest
 [PASS] Phase 4A consistency remains valid
 [PASS] Phase 3 Piper regression remains valid
-[BLOCKED] repository-local reBot binary STL assets physically present
 [PASS] repository runtime XML has no absolute/package mesh path
-[PASS] complete accepted mesh geometry loads in diagnostic mirror
+[PASS] canonical repository runtime scene loads
 [PASS] gripper lock = [0.05, 0.05]
 [PASS] all three gripper internal contact pairs = 0
 [PASS] six controlled arm DOF
 [PASS] J1->J6 actuator order / gear=1 runtime gate
-[PASS] deterministic 0.5 s static smoke with complete geometry
+[PASS] deterministic 0.5 s / 500-sample static smoke
 [PASS] no saturation
 [PASS] no unexpected contact
+[PASS] J1-J6 qfrc_constraint = 0
 [PASS] tau_cmd == tau_effort
 [PASS] Phase 3 simulation CSV semantics preserved
 [PASS] metadata source semantics explicit
 [PASS] all recorded values finite
 [PASS] q inside limits
+[PASS] ctest 4 / 4
 ```
-
-Because the repository-local binary asset gate is not closed:
 
 ```text
-PHASE 4B != PASS
+PHASE 4B = PASS
 ```
 
-Do not start Phase 4C yet. Once the ten STL files are copied byte-for-byte into `rebot_dm/assets/`, verify their SHA-256 values, rerun the canonical repository smoke command and `verify_rebot_phase4b_smoke.py`, then rerun CTest + Phase 4A + Phase 3 gates. Only then may Phase 4B be marked PASS.
+The next allowed task is the Phase 5A reBot-DM Pinocchio augmented-regressor / simulation-truth consistency gate. Fourier trajectory A/B and OLS/IRLS identification remain explicitly out of scope until that gate passes.

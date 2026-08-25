@@ -305,6 +305,8 @@ int main(int argc, char **argv) {
       recorded_trajectory_output = trajectory_output;
     }
     std::unique_ptr<app::ExperimentBackend> backend;
+    std::vector<double> joint_armature;
+    std::vector<double> joint_damping;
     std::vector<double> joint_frictionloss;
 
     if (experiment_config.backend == "piper_real") {
@@ -316,6 +318,8 @@ int main(int argc, char **argv) {
           experiment_config.hardware_config, 1.0 / controller.controlRateHz());
     } else {
       auto sim_config_loaded = sim_com_node::PandaSimulator::loadConfig(sim_config);
+      joint_armature = sim_config_loaded.joint_armature;
+      joint_damping = sim_config_loaded.joint_damping;
       joint_frictionloss = sim_config_loaded.joint_frictionloss;
       sim_config_loaded.enable_viewer =
           !headless && sim_config_loaded.enable_viewer;
@@ -328,11 +332,12 @@ int main(int argc, char **argv) {
     std::vector<double> damping_truth;
     if (experiment_config.robot == "rebot_dm") {
       gripper_lock_position = {0.05, 0.05};
-      armature_truth.assign(6, 0.0);
-      damping_truth.assign(6, 0.0);
-      if (joint_frictionloss != std::vector<double>(6, 0.0)) {
-        throw std::runtime_error(
-            "rebot_dm Phase 4B simulation truth 要求 frictionloss=[0,0,0,0,0,0]");
+      armature_truth = joint_armature.empty() ? std::vector<double>(6, 0.0)
+                                               : joint_armature;
+      damping_truth = joint_damping.empty() ? std::vector<double>(6, 0.0)
+                                             : joint_damping;
+      if (joint_frictionloss.empty()) {
+        joint_frictionloss.assign(6, 0.0);
       }
     }
 
