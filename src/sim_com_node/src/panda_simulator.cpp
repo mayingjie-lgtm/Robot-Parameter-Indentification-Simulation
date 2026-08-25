@@ -4,6 +4,7 @@
 
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
@@ -77,6 +78,57 @@ std::optional<bool> parseYamlBool(const std::string &trimmed,
   return std::nullopt;
 }
 
+/** Parse a non-empty string scalar from the flat simulator YAML. */
+std::optional<std::string> parseYamlString(const std::string &trimmed,
+                                           const std::string &key) {
+  if (trimmed.rfind(key, 0) != 0) {
+    return std::nullopt;
+  }
+  const auto colon = trimmed.find(':', key.size());
+  if (colon == std::string::npos) {
+    return std::nullopt;
+  }
+  std::string value = trimCopy(trimmed.substr(colon + 1));
+  const auto comment = value.find('#');
+  if (comment != std::string::npos) {
+    value = trimCopy(value.substr(0, comment));
+  }
+  if (value.size() >= 2 &&
+      ((value.front() == '"' && value.back() == '"') ||
+       (value.front() == '\'' && value.back() == '\''))) {
+    value = value.substr(1, value.size() - 2);
+  }
+  return value.empty() ? std::nullopt : std::optional<std::string>(value);
+}
+
+/** Parse a bracketed floating-point array from the flat simulator YAML. */
+std::optional<std::vector<double>> parseYamlDoubleArray(
+    const std::string &trimmed, const std::string &key) {
+  if (trimmed.rfind(key, 0) != 0) {
+    return std::nullopt;
+  }
+  const auto colon = trimmed.find(':', key.size());
+  if (colon == std::string::npos) {
+    return std::nullopt;
+  }
+  std::string value = trimCopy(trimmed.substr(colon + 1));
+  const auto comment = value.find('#');
+  if (comment != std::string::npos) {
+    value = trimCopy(value.substr(0, comment));
+  }
+  if (value.size() < 2 || value.front() != '[' || value.back() != ']') {
+    return std::nullopt;
+  }
+  value = value.substr(1, value.size() - 2);
+  std::stringstream stream(value);
+  std::string token;
+  std::vector<double> result;
+  while (std::getline(stream, token, ',')) {
+    result.push_back(std::stod(trimCopy(token)));
+  }
+  return result;
+}
+
 } // namespace
 
 namespace sim_com_node {
@@ -100,6 +152,12 @@ PandaSimConfig PandaSimulator::loadConfig(const std::filesystem::path &path) {
       config.simulation_rate_hz = *rate;
     } else if (const auto enable = parseYamlBool(trimmed, "enable_viewer")) {
       config.enable_viewer = *enable;
+    } else if (const auto keyframe =
+                   parseYamlString(trimmed, "initial_keyframe")) {
+      config.initial_keyframe = *keyframe;
+    } else if (const auto friction =
+                   parseYamlDoubleArray(trimmed, "joint_frictionloss")) {
+      config.joint_frictionloss = *friction;
     }
   }
 
@@ -131,11 +189,13 @@ PandaSimulator::PandaSimulator(const PandaSimConfig &config,
     model_->opt.timestep = 1.0 / config_.simulation_rate_hz;
   }
 
-  const int home_id = mj_name2id(model_.get(), mjOBJ_KEY, "home");
+  const int home_id = mj_name2id(model_.get(), mjOBJ_KEY,
+                                 config_.initial_keyframe.c_str());
   if (home_id >= 0) {
     mj_resetDataKeyframe(model_.get(), data_.get(), home_id);
   } else {
-    mj_resetData(model_.get(), data_.get());
+    throw std::runtime_error("MuJoCo 场景缺少配置的初始 keyframe: " +
+                             config_.initial_keyframe);
   }
 
   joint_indices_.reserve(model_->njnt);
@@ -154,6 +214,24 @@ PandaSimulator::PandaSimulator(const PandaSimConfig &config,
   }
   if (recorded_dof_ == 0 || recorded_dof_ > joint_indices_.size()) {
     throw std::runtime_error("记录自由度配置非法，超出当前模型可用关节数");
+  }
+
+  if (!config_.joint_frictionloss.empty()) {
+    if (config_.joint_frictionloss.size() != recorded_dof_) {
+      throw std::runtime_error(
+          "joint_frictionloss 必须与记录的机械臂自由度数量一致");
+    }
+    for (std::size_t joint = 0; joint < recorded_dof_; ++joint) {
+      const double friction = config_.joint_frictionloss[joint];
+      if (!std::isfinite(friction) || friction < 0.0) {
+        throw std::runtime_error("joint_frictionloss 必须为有限非负数");
+      }
+      const int dof_index = model_->jnt_dofadr[joint_indices_[joint]];
+      model_->dof_frictionloss[dof_index] = friction;
+      if (model_->dof_frictionloss[dof_index] != friction) {
+        throw std::runtime_error("MuJoCo dof_frictionloss 写入校验失败");
+      }
+    }
   }
 
   if (!record_file.empty()) {
@@ -194,9 +272,20 @@ JointState PandaSimulator::currentState() const {
   return state;
 }
 
-void PandaSimulator::step(const std::vector<double> &torques, bool saturated) {
+SimulationStepTruth PandaSimulator::step(const std::vector<double> &torques,
+                                         bool saturated) {
   std::lock_guard<std::mutex> lock(data_mutex_);
   saturated_ = saturated;
+
+  SimulationStepTruth truth;
+  truth.time_begin = simulation_time_;
+  truth.position.resize(joint_indices_.size());
+  truth.velocity.resize(joint_indices_.size());
+  for (std::size_t i = 0; i < joint_indices_.size(); ++i) {
+    const int joint_index = joint_indices_[i];
+    truth.position[i] = data_->qpos[model_->jnt_qposadr[joint_index]];
+    truth.velocity[i] = data_->qvel[model_->jnt_dofadr[joint_index]];
+  }
 
   const std::size_t limit =
       std::min<std::size_t>(torques.size(), static_cast<std::size_t>(model_->nu));
@@ -210,9 +299,23 @@ void PandaSimulator::step(const std::vector<double> &torques, bool saturated) {
   mj_step(model_.get(), data_.get());
   simulation_time_ += model_->opt.timestep;
 
+  // mj_step leaves acceleration and generalized forces from the state that
+  // was evaluated immediately before the integration update.
+  truth.acceleration.resize(joint_indices_.size());
+  truth.actuator_effort.resize(joint_indices_.size());
+  truth.constraint_effort.resize(joint_indices_.size());
+  for (std::size_t i = 0; i < joint_indices_.size(); ++i) {
+    const int dof_index = model_->jnt_dofadr[joint_indices_[i]];
+    truth.acceleration[i] = data_->qacc[dof_index];
+    truth.actuator_effort[i] = data_->qfrc_actuator[dof_index];
+    truth.constraint_effort[i] = data_->qfrc_constraint[dof_index];
+  }
+  truth.contact_count = data_->ncon;
+
   if (recording_) {
     recordCurrentStep();
   }
+  return truth;
 }
 
 void PandaSimulator::startDataRecording(const std::filesystem::path &record_file) {

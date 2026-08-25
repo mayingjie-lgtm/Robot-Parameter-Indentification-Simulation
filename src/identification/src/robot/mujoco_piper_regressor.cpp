@@ -4,7 +4,12 @@
  */
 
 #include "mujoco_piper_regressor.hpp"
+
+#include <mujoco/mujoco.h>
+
 #include <iostream>
+#include <memory>
+#include <stdexcept>
 
 namespace mujoco_dynamics {
 
@@ -12,83 +17,180 @@ namespace mujoco_dynamics {
 // MuJoCoPiperRegressor 构造函数
 // ============================================================================
 
-MuJoCoPiperRegressor::MuJoCoPiperRegressor() { initBodies(); }
+MuJoCoPiperRegressor::MuJoCoPiperRegressor()
+    : MuJoCoPiperRegressor(std::filesystem::path(PROJECT_ROOT_DIR) / "piper" /
+                           "piper.xml") {}
 
-void MuJoCoPiperRegressor::initBodies() {
+MuJoCoPiperRegressor::MuJoCoPiperRegressor(
+    const std::filesystem::path &model_path,
+    const std::array<double, 2> &gripper_position,
+    const std::vector<double> &frictionloss) {
+  initBodies(model_path, gripper_position, frictionloss);
+}
+
+void MuJoCoPiperRegressor::initBodies(
+    const std::filesystem::path &model_path,
+    const std::array<double, 2> &gripper_position,
+    const std::vector<double> &frictionloss) {
+  char error[1024]{};
+  std::unique_ptr<mjModel, decltype(&mj_deleteModel)> model(
+      mj_loadXML(model_path.string().c_str(), nullptr, error, sizeof(error)),
+      mj_deleteModel);
+  if (!model) {
+    throw std::runtime_error("Failed to load Piper model parameters: " +
+                             std::string(error));
+  }
+  std::unique_ptr<mjData, decltype(&mj_deleteData)> data(
+      mj_makeData(model.get()), mj_deleteData);
+  if (!data) {
+    throw std::runtime_error("Failed to allocate Piper model data");
+  }
+  if (!frictionloss.empty() && frictionloss.size() != N_DOF) {
+    throw std::runtime_error("Piper frictionloss must contain six values");
+  }
+
+  const auto body_matrix = [](const mjtNum *values) -> Matrix3d {
+    return Eigen::Map<const Eigen::Matrix<mjtNum, 3, 3, Eigen::RowMajor>>(
+               values)
+        .template cast<double>()
+        .eval();
+  };
+  const auto body_inertia = [&body_matrix](const mjModel *loaded,
+                                           int body_id) -> Matrix3d {
+    mjtNum rotation_values[9];
+    mju_quat2Mat(rotation_values, loaded->body_iquat + 4 * body_id);
+    const Matrix3d rotation = body_matrix(rotation_values);
+    const Vector3d principal(
+        loaded->body_inertia[3 * body_id],
+        loaded->body_inertia[3 * body_id + 1],
+        loaded->body_inertia[3 * body_id + 2]);
+    return (rotation * principal.asDiagonal() * rotation.transpose()).eval();
+  };
+  const auto assign_inertia = [](MuJoCoBody &body, const Matrix3d &inertia) {
+    body.Ixx = inertia(0, 0);
+    body.Ixy = inertia(0, 1);
+    body.Ixz = inertia(0, 2);
+    body.Iyy = inertia(1, 1);
+    body.Iyz = inertia(1, 2);
+    body.Izz = inertia(2, 2);
+  };
+  const auto require_id = [model_ptr = model.get()](mjtObj type,
+                                                     const std::string &name) {
+    const int id = mj_name2id(model_ptr, type, name.c_str());
+    if (id < 0) {
+      throw std::runtime_error("Piper model is missing object: " + name);
+    }
+    return id;
+  };
+
+  const int base_id = require_id(mjOBJ_BODY, "base_link");
   bodies_[0].name = "base_link";
-  bodies_[0].mass = 1.02;
-  bodies_[0].com = Vector3d(-0.00473641, 2.56829e-05, 0.041452);
-  bodies_[0].Ixx = 0.00267433;
-  bodies_[0].Iyy = 0.00282612;
-  bodies_[0].Izz = 0.00089624;
-  bodies_[0].Ixy = -0.00000073;
-  bodies_[0].Ixz = -0.00017389;
-  bodies_[0].Iyz = 0.0000004;
+  bodies_[0].pos = Vector3d(model->body_pos[3 * base_id],
+                            model->body_pos[3 * base_id + 1],
+                            model->body_pos[3 * base_id + 2]);
+  bodies_[0].quat = Quaterniond(model->body_quat[4 * base_id],
+                                model->body_quat[4 * base_id + 1],
+                                model->body_quat[4 * base_id + 2],
+                                model->body_quat[4 * base_id + 3])
+                          .normalized();
   bodies_[0].has_joint = false;
 
-  bodies_[1].name = "link1";
-  bodies_[1].pos = Vector3d(0.0, 0.0, 0.123);
-  bodies_[1].quat = Quaterniond(1.0, 0.0, 0.0, 0.0);
-  bodies_[1].mass = 0.71;
-  bodies_[1].com = Vector3d(0.000121505, 0.000104632, -0.00438597);
-  bodies_[1].Ixx = 0.000489262;
-  bodies_[1].Iyy = 0.000439887;
-  bodies_[1].Izz = 0.000404551;
-  bodies_[1].has_joint = true;
-
-  bodies_[2].name = "link2";
-  bodies_[2].quat = Quaterniond(0.0356735, -0.0356786, -0.706207, -0.706205);
-  bodies_[2].mass = 1.17;
-  bodies_[2].com = Vector3d(0.198666, -0.0109269, 0.00142122);
-  bodies_[2].Ixx = 0.0679032;
-  bodies_[2].Iyy = 0.067745;
-  bodies_[2].Izz = 0.00111966;
-  bodies_[2].has_joint = true;
-
-  bodies_[3].name = "link3";
-  bodies_[3].pos = Vector3d(0.28503, 0.0, 0.0);
-  bodies_[3].quat = Quaterniond(0.637536, 0.0, 0.0, -0.77042);
-  bodies_[3].mass = 0.5;
-  bodies_[3].com = Vector3d(-0.0202738, -0.133915, -0.000458683);
-  bodies_[3].Ixx = 0.0138227;
-  bodies_[3].Iyy = 0.0138032;
-  bodies_[3].Izz = 0.000244685;
-  bodies_[3].has_joint = true;
-
-  bodies_[4].name = "link4";
-  bodies_[4].pos = Vector3d(-0.021984, -0.25075, 0.0);
-  bodies_[4].quat = Quaterniond(0.707105, 0.707108, 0.0, 0.0);
-  bodies_[4].mass = 0.38;
-  bodies_[4].com = Vector3d(-9.66636e-05, 0.000876064, -0.00496881);
-  bodies_[4].Ixx = 0.000191586;
-  bodies_[4].Iyy = 0.000185052;
-  bodies_[4].Izz = 0.000152863;
-  bodies_[4].has_joint = true;
-
-  bodies_[5].name = "link5";
-  bodies_[5].quat = Quaterniond(0.707105, -0.707108, 0.0, 0.0);
-  bodies_[5].mass = 0.383;
-  bodies_[5].com = Vector3d(-4.10554e-05, -0.0566487, -0.00372058);
-  bodies_[5].Ixx = 0.00166169;
-  bodies_[5].Iyy = 0.00164328;
-  bodies_[5].Izz = 0.000185028;
-  bodies_[5].has_joint = true;
-
-  bodies_[6].name = "link6";
-  bodies_[6].pos = Vector3d(8.8259e-05, -0.091, 0.0);
-  bodies_[6].quat = Quaterniond(0.707105, 0.707108, 0.0, 0.0);
-  bodies_[6].mass = 0.456991;
-  bodies_[6].com = Vector3d(-0.000182345, 7.94104e-05, 0.0316214);
-  bodies_[6].Ixx = 0.000938039;
-  bodies_[6].Iyy = 0.000723068;
-  bodies_[6].Izz = 0.000395388;
-  bodies_[6].has_joint = true;
-
-  for (std::size_t i = 1; i <= N_BODIES; ++i) {
-    bodies_[i].joint_axis = Vector3d(0.0, 0.0, 1.0);
-    bodies_[i].armature = 0.1;
-    bodies_[i].damping = 1.0;
+  for (std::size_t index = 1; index <= N_BODIES; ++index) {
+    const std::string body_name = "link" + std::to_string(index);
+    const std::string joint_name = "joint" + std::to_string(index);
+    const int body_id = require_id(mjOBJ_BODY, body_name);
+    const int joint_id = require_id(mjOBJ_JOINT, joint_name);
+    const int dof_id = model->jnt_dofadr[joint_id];
+    auto &body = bodies_[index];
+    body.name = body_name;
+    body.pos = Vector3d(model->body_pos[3 * body_id],
+                        model->body_pos[3 * body_id + 1],
+                        model->body_pos[3 * body_id + 2]);
+    body.quat = Quaterniond(model->body_quat[4 * body_id],
+                            model->body_quat[4 * body_id + 1],
+                            model->body_quat[4 * body_id + 2],
+                            model->body_quat[4 * body_id + 3])
+                    .normalized();
+    body.mass = model->body_mass[body_id];
+    body.com = Vector3d(model->body_ipos[3 * body_id],
+                        model->body_ipos[3 * body_id + 1],
+                        model->body_ipos[3 * body_id + 2]);
+    assign_inertia(body, body_inertia(model.get(), body_id));
+    body.joint_axis = Vector3d(model->jnt_axis[3 * joint_id],
+                               model->jnt_axis[3 * joint_id + 1],
+                               model->jnt_axis[3 * joint_id + 2]);
+    body.armature = model->dof_armature[dof_id];
+    body.damping = model->dof_damping[dof_id];
+    frictionloss_[index - 1] = frictionloss.empty()
+                                   ? model->dof_frictionloss[dof_id]
+                                   : frictionloss[index - 1];
+    body.has_joint = true;
   }
+
+  const int home_id = mj_name2id(model.get(), mjOBJ_KEY, "home");
+  if (home_id >= 0) {
+    mj_resetDataKeyframe(model.get(), data.get(), home_id);
+  } else {
+    mj_resetData(model.get(), data.get());
+  }
+  for (std::size_t finger = 0; finger < gripper_position.size(); ++finger) {
+    const int joint_id =
+        require_id(mjOBJ_JOINT, "joint" + std::to_string(7 + finger));
+    data->qpos[model->jnt_qposadr[joint_id]] = gripper_position[finger];
+  }
+  mj_forward(model.get(), data.get());
+
+  const int link6_id = require_id(mjOBJ_BODY, "link6");
+  const Matrix3d world_from_link6 = body_matrix(data->xmat + 9 * link6_id);
+  const Vector3d link6_origin_world(data->xpos[3 * link6_id],
+                                    data->xpos[3 * link6_id + 1],
+                                    data->xpos[3 * link6_id + 2]);
+  auto &link6 = bodies_[6];
+  double total_mass = link6.mass;
+  Vector3d total_first_moment = link6.mass * link6.com;
+  Matrix3d link6_com_inertia;
+  link6_com_inertia << link6.Ixx, link6.Ixy, link6.Ixz, link6.Ixy,
+      link6.Iyy, link6.Iyz, link6.Ixz, link6.Iyz, link6.Izz;
+  Matrix3d total_origin_inertia =
+      link6_com_inertia +
+      link6.mass * (link6.com.squaredNorm() * Matrix3d::Identity() -
+                    link6.com * link6.com.transpose());
+
+  for (const char *finger_name : {"left_finger", "right_finger"}) {
+    const int finger_id = require_id(mjOBJ_BODY, finger_name);
+    const double mass = model->body_mass[finger_id];
+    const Vector3d com_world(data->xipos[3 * finger_id],
+                             data->xipos[3 * finger_id + 1],
+                             data->xipos[3 * finger_id + 2]);
+    const Vector3d com_link6 =
+        world_from_link6.transpose() * (com_world - link6_origin_world);
+    const Matrix3d world_from_inertia =
+        body_matrix(data->ximat + 9 * finger_id);
+    const Vector3d principal(model->body_inertia[3 * finger_id],
+                             model->body_inertia[3 * finger_id + 1],
+                             model->body_inertia[3 * finger_id + 2]);
+    const Matrix3d inertia_world =
+        world_from_inertia * principal.asDiagonal() *
+        world_from_inertia.transpose();
+    const Matrix3d inertia_link6 =
+        world_from_link6.transpose() * inertia_world * world_from_link6;
+    total_mass += mass;
+    total_first_moment += mass * com_link6;
+    total_origin_inertia +=
+        inertia_link6 +
+        mass * (com_link6.squaredNorm() * Matrix3d::Identity() -
+                com_link6 * com_link6.transpose());
+  }
+
+  link6.mass = total_mass;
+  link6.com = total_first_moment / total_mass;
+  const Matrix3d composite_com_inertia =
+      total_origin_inertia -
+      total_mass * (link6.com.squaredNorm() * Matrix3d::Identity() -
+                    link6.com * link6.com.transpose());
+  assign_inertia(link6, composite_com_inertia);
+  gravity_ = Vector3d(model->opt.gravity[0], model->opt.gravity[1],
+                      model->opt.gravity[2]);
 }
 
 // ============================================================================
@@ -104,7 +206,7 @@ MuJoCoPiperRegressor::Matrix3d MuJoCoPiperRegressor::skew(const Vector3d &v) {
 MuJoCoPiperRegressor::Matrix4d
 MuJoCoPiperRegressor::poseToTransform(const Vector3d &pos, const Quaterniond &quat) {
   Matrix4d T = Matrix4d::Identity();
-  T.block<3, 3>(0, 0) = quat.toRotationMatrix();
+  T.block<3, 3>(0, 0) = quat.normalized().toRotationMatrix();
   T.block<3, 1>(0, 3) = pos;
   return T;
 }
@@ -147,21 +249,8 @@ MuJoCoPiperRegressor::computeBodyTransforms(const VectorXd &q) const {
   return transforms;
 }
 
-MuJoCoPiperRegressor::Vector3d
-MuJoCoPiperRegressor::computeBodyCOM(std::size_t body_idx, const VectorXd &q) const {
-  auto transforms = computeBodyTransforms(q);
-  Vector3d com_local = bodies_[body_idx].com;
-  Matrix4d T = transforms[body_idx];
-  return T.block<3, 3>(0, 0) * com_local + T.block<3, 1>(0, 3);
-}
-
 /**
  * @brief 计算 Body 原点的雅可比矩阵 (用于回归矩阵)
- *
- * 注意：这与 computeBodyJacobian 不同！
- * - computeBodyJacobian: 计算 COM 的雅可比 (用于动力学)
- * - computeBodyOriginJacobian: 计算 Body 原点的雅可比 (用于回归矩阵)
- *
  * 回归矩阵使用标准惯性参数 (m, mc, I_origin)，惯量定义在 Body 原点
  */
 MuJoCoPiperRegressor::MatrixXd
@@ -198,60 +287,40 @@ MuJoCoPiperRegressor::computeBodyOriginJacobian(std::size_t body_idx,
 }
 
 MuJoCoPiperRegressor::MatrixXd
-MuJoCoPiperRegressor::computeBodyJacobian(std::size_t body_idx,
-                                     const VectorXd &q) const {
-  MatrixXd J = MatrixXd::Zero(6, N_DOF);
+MuJoCoPiperRegressor::computeBodyOriginJacobianDerivative(
+    std::size_t body_idx, const VectorXd &q, const VectorXd &qd) const {
+  MatrixXd derivative = MatrixXd::Zero(6, N_DOF);
+  const auto transforms = computeBodyTransforms(q);
+  const MatrixXd jacobian = computeBodyOriginJacobian(body_idx, q);
+  const Vector3d body_origin =
+      transforms[body_idx].block<3, 1>(0, 3);
+  const Vector3d body_velocity = jacobian.topRows(3) * qd;
 
-  auto transforms = computeBodyTransforms(q);
-  Vector3d p_body = computeBodyCOM(body_idx, q);
-
-  // 对每个关节
-  std::size_t joint_count = 0;
-  for (std::size_t i = 1; i <= body_idx && i <= N_BODIES; ++i) {
-    if (bodies_[i].has_joint) {
-      // 关节轴在世界坐标系中的方向
-      Vector3d z_axis = transforms[i].block<3, 3>(0, 0) * bodies_[i].joint_axis;
-
-      // 关节原点位置
-      Vector3d p_joint = transforms[i].block<3, 1>(0, 3);
-
-      // 线速度雅可比: z × (p_body - p_joint)
-      J.block<3, 1>(0, joint_count) = z_axis.cross(p_body - p_joint);
-
-      // 角速度雅可比: z
-      J.block<3, 1>(3, joint_count) = z_axis;
-
-      ++joint_count;
+  Vector3d preceding_angular_velocity = Vector3d::Zero();
+  for (std::size_t joint = 1; joint <= body_idx; ++joint) {
+    const Eigen::Index column = static_cast<Eigen::Index>(joint - 1);
+    const Vector3d axis = jacobian.block<3, 1>(3, column);
+    const Vector3d joint_origin =
+        transforms[joint].block<3, 1>(0, 3);
+    Vector3d joint_velocity = Vector3d::Zero();
+    for (std::size_t ancestor = 1; ancestor < joint; ++ancestor) {
+      const Eigen::Index ancestor_column =
+          static_cast<Eigen::Index>(ancestor - 1);
+      const Vector3d ancestor_axis =
+          jacobian.block<3, 1>(3, ancestor_column);
+      const Vector3d ancestor_origin =
+          transforms[ancestor].block<3, 1>(0, 3);
+      joint_velocity += ancestor_axis.cross(joint_origin - ancestor_origin) *
+                        qd(ancestor_column);
     }
+    const Vector3d axis_derivative = preceding_angular_velocity.cross(axis);
+    derivative.block<3, 1>(0, column) =
+        axis_derivative.cross(body_origin - joint_origin) +
+        axis.cross(body_velocity - joint_velocity);
+    derivative.block<3, 1>(3, column) = axis_derivative;
+    preceding_angular_velocity += axis * qd(column);
   }
-
-  return J;
-}
-
-MuJoCoPiperRegressor::MatrixXd MuJoCoPiperRegressor::computeBodyOriginJacobianDerivative(
-    std::size_t body_idx, const VectorXd &q, const VectorXd &qd) const {
-  // 数值微分
-  const double eps = 1e-7;
-  VectorXd q_plus = q + eps * qd;
-  VectorXd q_minus = q - eps * qd;
-
-  MatrixXd J_plus = computeBodyOriginJacobian(body_idx, q_plus);
-  MatrixXd J_minus = computeBodyOriginJacobian(body_idx, q_minus);
-
-  return (J_plus - J_minus) / (2.0 * eps);
-}
-
-MuJoCoPiperRegressor::MatrixXd MuJoCoPiperRegressor::computeBodyJacobianDerivative(
-    std::size_t body_idx, const VectorXd &q, const VectorXd &qd) const {
-  // 数值微分
-  const double eps = 1e-7;
-  VectorXd q_plus = q + eps * qd;
-  VectorXd q_minus = q - eps * qd;
-
-  MatrixXd J_plus = computeBodyJacobian(body_idx, q_plus);
-  MatrixXd J_minus = computeBodyJacobian(body_idx, q_minus);
-
-  return (J_plus - J_minus) / (2.0 * eps);
+  return derivative;
 }
 
 // ============================================================================
@@ -266,6 +335,10 @@ std::size_t MuJoCoPiperRegressor::numParameters(MuJoCoParamFlags flags) const {
   }
 
   if (hasFlag(flags, MuJoCoParamFlags::DAMPING)) {
+    params += N_DOF;
+  }
+
+  if (hasFlag(flags, MuJoCoParamFlags::FRICTION_LOSS)) {
     params += N_DOF;
   }
 
@@ -302,6 +375,13 @@ MuJoCoPiperRegressor::computeParameterVector(MuJoCoParamFlags flags) const {
     for (std::size_t i = 0; i < N_DOF; ++i) {
       theta(current_offset + i) = bodies_[i + 1].damping;
     }
+    current_offset += N_DOF;
+  }
+
+  if (hasFlag(flags, MuJoCoParamFlags::FRICTION_LOSS)) {
+    for (std::size_t i = 0; i < N_DOF; ++i) {
+      theta(current_offset + i) = frictionloss_[i];
+    }
   }
 
   return theta;
@@ -331,6 +411,12 @@ MuJoCoPiperRegressor::getParameterNames(MuJoCoParamFlags flags) const {
   if (hasFlag(flags, MuJoCoParamFlags::DAMPING)) {
     for (std::size_t i = 0; i < N_DOF; ++i) {
       names.push_back("damping_" + std::to_string(i + 1));
+    }
+  }
+
+  if (hasFlag(flags, MuJoCoParamFlags::FRICTION_LOSS)) {
+    for (std::size_t i = 0; i < N_DOF; ++i) {
+      names.push_back("frictionloss_" + std::to_string(i + 1));
     }
   }
 
@@ -364,41 +450,12 @@ MuJoCoPiperRegressor::MatrixXd MuJoCoPiperRegressor::computeBodyRegressorBlock(
 
   auto transforms = computeBodyTransforms(q);
   Matrix3d R = transforms[body_idx].block<3, 3>(0, 0); // Body 到 World 旋转
-  Vector3d p_origin = transforms[body_idx].block<3, 1>(0, 3); // Body 原点位置
 
-  // ========== 计算 Body 原点的雅可比 (世界坐标系) ==========
-  MatrixXd J_world = MatrixXd::Zero(6, N_DOF);
-  std::size_t joint_count = 0;
-  for (std::size_t i = 1; i <= body_idx && i <= N_BODIES; ++i) {
-    if (bodies_[i].has_joint) {
-      Vector3d z_axis = transforms[i].block<3, 3>(0, 0) * bodies_[i].joint_axis;
-      Vector3d p_joint = transforms[i].block<3, 1>(0, 3);
-      J_world.block<3, 1>(0, joint_count) = z_axis.cross(p_origin - p_joint);
-      J_world.block<3, 1>(3, joint_count) = z_axis;
-      ++joint_count;
-    }
-  }
-
-  // 雅可比导数（数值微分）
-  const double dt = 1e-7;
-  VectorXd q_plus = q + dt * qd;
-  auto transforms_plus = computeBodyTransforms(q_plus);
-  Vector3d p_origin_plus = transforms_plus[body_idx].block<3, 1>(0, 3);
-
-  MatrixXd J_world_plus = MatrixXd::Zero(6, N_DOF);
-  joint_count = 0;
-  for (std::size_t i = 1; i <= body_idx && i <= N_BODIES; ++i) {
-    if (bodies_[i].has_joint) {
-      Vector3d z_axis =
-          transforms_plus[i].block<3, 3>(0, 0) * bodies_[i].joint_axis;
-      Vector3d p_joint = transforms_plus[i].block<3, 1>(0, 3);
-      J_world_plus.block<3, 1>(0, joint_count) =
-          z_axis.cross(p_origin_plus - p_joint);
-      J_world_plus.block<3, 1>(3, joint_count) = z_axis;
-      ++joint_count;
-    }
-  }
-  MatrixXd J_world_dot = (J_world_plus - J_world) / dt;
+  // The analytic derivative avoids turning structural null directions into
+  // small non-zero singular values during rank analysis.
+  const MatrixXd J_world = computeBodyOriginJacobian(body_idx, q);
+  const MatrixXd J_world_dot =
+      computeBodyOriginJacobianDerivative(body_idx, q, qd);
 
   Eigen::Matrix<double, 3, Eigen::Dynamic> Jv_world = J_world.topRows(3);
   Eigen::Matrix<double, 3, Eigen::Dynamic> Jw_world = J_world.bottomRows(3);
@@ -487,12 +544,21 @@ MuJoCoPiperRegressor::computeRegressorMatrix(const VectorXd &q, const VectorXd &
     current_offset += N_DOF;
   }
 
-  // Damping 回归: 在 MuJoCo 中 damping 是被动项
-  // τ_ctrl = M*q̈ + C*q̇ + G - damping*q̇
-  // 所以回归项是 -q̇
+  // MuJoCo applies passive damping as -d*qdot, so the actuator must provide
+  // +d*qdot in the inverse-dynamics torque balance.
   if (hasFlag(flags, MuJoCoParamFlags::DAMPING)) {
     for (std::size_t i = 0; i < N_DOF; ++i) {
-      Y(i, current_offset + i) = -qd(i);
+      Y(i, current_offset + i) = qd(i);
+    }
+    current_offset += N_DOF;
+  }
+
+  // Away from zero velocity, MuJoCo frictionloss requires actuator
+  // compensation with the same sign as qdot.
+  if (hasFlag(flags, MuJoCoParamFlags::FRICTION_LOSS)) {
+    for (std::size_t i = 0; i < N_DOF; ++i) {
+      Y(i, current_offset + i) =
+          qd(i) > 0.0 ? 1.0 : (qd(i) < 0.0 ? -1.0 : 0.0);
     }
   }
 

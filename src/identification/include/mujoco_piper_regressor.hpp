@@ -2,6 +2,8 @@
 
 #include "mujoco_regressor.hpp"
 
+#include <filesystem>
+
 namespace mujoco_dynamics {
 
 class MuJoCoPiperRegressor {
@@ -16,7 +18,21 @@ public:
   using Matrix4d = Eigen::Matrix4d;
   using Quaterniond = Eigen::Quaterniond;
 
+  /** Load the repository Piper model with the fixed-open gripper convention. */
   MuJoCoPiperRegressor();
+
+  /**
+   * Load Piper kinematics and inertial truth from a compiled MuJoCo model.
+   *
+   * @param model_path Full Piper MJCF path.
+   * @param gripper_position Fixed joint7/joint8 positions used for link6
+   * composition.
+   * @param frictionloss Optional runtime plant values overriding model zeros.
+   */
+  explicit MuJoCoPiperRegressor(
+      const std::filesystem::path &model_path,
+      const std::array<double, 2> &gripper_position = {0.035, -0.035},
+      const std::vector<double> &frictionloss = {});
 
   VectorXd
   computeParameterVector(MuJoCoParamFlags flags = MuJoCoParamFlags::ALL) const;
@@ -38,22 +54,19 @@ public:
 
 private:
   std::array<MuJoCoBody, N_BODIES + 1> bodies_; // base_link + link1-6
+  std::array<double, N_DOF> frictionloss_{};
   Vector3d gravity_{0, 0, -9.81};
 
-  void initBodies();
+  void initBodies(const std::filesystem::path &model_path,
+                  const std::array<double, 2> &gripper_position,
+                  const std::vector<double> &frictionloss);
 
   std::vector<Matrix4d> computeBodyTransforms(const VectorXd &q) const;
-  Vector3d computeBodyCOM(std::size_t body_idx, const VectorXd &q) const;
   MatrixXd computeBodyOriginJacobian(std::size_t body_idx,
                                      const VectorXd &q) const;
   MatrixXd computeBodyOriginJacobianDerivative(std::size_t body_idx,
                                                const VectorXd &q,
                                                const VectorXd &qd) const;
-  MatrixXd computeBodyJacobian(std::size_t body_idx, const VectorXd &q) const;
-  MatrixXd computeBodyJacobianDerivative(std::size_t body_idx,
-                                         const VectorXd &q,
-                                         const VectorXd &qd) const;
-
   static Matrix3d skew(const Vector3d &v);
   static Matrix4d poseToTransform(const Vector3d &pos, const Quaterniond &quat);
 

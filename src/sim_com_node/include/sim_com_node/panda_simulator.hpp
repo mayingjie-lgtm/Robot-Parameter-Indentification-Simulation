@@ -19,6 +19,8 @@ namespace sim_com_node {
 struct PandaSimConfig {
   double simulation_rate_hz = 1000.0;
   bool enable_viewer = true;
+  std::string initial_keyframe = "home";
+  std::vector<double> joint_frictionloss;
 };
 
 struct JointState {
@@ -26,6 +28,17 @@ struct JointState {
   std::vector<double> position;
   std::vector<double> velocity;
   std::vector<double> effort;
+};
+
+/** Exact MuJoCo quantities evaluated for one pre-integration simulation state. */
+struct SimulationStepTruth {
+  double time_begin{0.0};
+  std::vector<double> position;
+  std::vector<double> velocity;
+  std::vector<double> acceleration;
+  std::vector<double> actuator_effort;
+  std::vector<double> constraint_effort;
+  int contact_count{0};
 };
 
 class PandaSimulator {
@@ -40,8 +53,19 @@ public:
 
   double simulationTime() const { return simulation_time_; }
   double timeStep() const;
+  /** Return the explicitly configured arm dry-friction truth. */
+  const std::vector<double> &jointFrictionloss() const {
+    return config_.joint_frictionloss;
+  }
   JointState currentState() const;
-  void step(const std::vector<double> &torques, bool saturated);
+  /**
+   * Advance MuJoCo once and return quantities evaluated before integration.
+   *
+   * @param torques Actuator controls for this simulation interval.
+   * @param saturated Whether the upstream controller saturated the command.
+   * @return Pre-integration state, acceleration, and generalized forces.
+   */
+  SimulationStepTruth step(const std::vector<double> &torques, bool saturated);
 
 private:
   void startViewer();

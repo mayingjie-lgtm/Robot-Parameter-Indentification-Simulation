@@ -6,6 +6,7 @@
 #include "mujoco_regressor.hpp"
 #include "mujoco_piper_regressor.hpp"
 #include "robot/robot_model.hpp"
+#include <filesystem>
 #include <memory>
 #include <string>
 
@@ -21,9 +22,13 @@ public:
    * @brief 构造函数
    *
    * @param robot_type 机械臂类型，支持 "panda" / "piper"
+   * @param piper_model_path Piper mjModel source; empty uses the repository model
+   * @param piper_frictionloss Optional runtime dry-friction truth for six joints
    * @param model 保留用于兼容性的机器人模型指针
    */
   explicit Identification(const std::string &robot_type = "panda",
+                          const std::filesystem::path &piper_model_path = {},
+                          const std::vector<double> &piper_frictionloss = {},
                           std::unique_ptr<robot::RobotModel> model = nullptr);
 
   /**

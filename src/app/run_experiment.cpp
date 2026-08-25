@@ -4,12 +4,18 @@
 #include "app/simulation_backend.hpp"
 #include "force_node/force_controller.hpp"
 
+#include <openssl/evp.h>
+
+#include <array>
 #include <filesystem>
 #include <fstream>
+#include <cstdint>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <optional>
 #include <stdexcept>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -38,6 +44,59 @@ bool hasFlag(int argc, char **argv, const std::string &flag) {
     }
   }
   return false;
+}
+
+/** Read an optional unsigned command-line value following a flag. */
+std::optional<std::uint32_t> readArgUnsigned(int argc, char **argv,
+                                            const std::string &flag) {
+  for (int i = 1; i + 1 < argc; ++i) {
+    if (argv[i] == flag) {
+      return static_cast<std::uint32_t>(std::stoul(argv[i + 1]));
+    }
+  }
+  return std::nullopt;
+}
+
+/** Derive the trajectory sidecar name from the dataset path. */
+fs::path defaultTrajectoryFile(const fs::path &dataset_path) {
+  fs::path result = dataset_path;
+  result.replace_extension(".trajectory.csv");
+  return result;
+}
+
+/** Compute the SHA-256 digest of an accepted Fourier coefficient file. */
+std::string sha256File(const fs::path &path) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input) {
+    throw std::runtime_error("无法读取待哈希的 Fourier 系数: " +
+                             path.string());
+  }
+  using DigestContext = std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)>;
+  DigestContext context(EVP_MD_CTX_new(), EVP_MD_CTX_free);
+  if (!context || EVP_DigestInit_ex(context.get(), EVP_sha256(), nullptr) != 1) {
+    throw std::runtime_error("无法初始化 SHA-256");
+  }
+  std::array<char, 8192> buffer{};
+  while (input) {
+    input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+    const std::streamsize count = input.gcount();
+    if (count > 0 &&
+        EVP_DigestUpdate(context.get(), buffer.data(),
+                         static_cast<std::size_t>(count)) != 1) {
+      throw std::runtime_error("无法更新 Fourier 系数 SHA-256");
+    }
+  }
+  std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+  unsigned int digest_size = 0;
+  if (EVP_DigestFinal_ex(context.get(), digest.data(), &digest_size) != 1) {
+    throw std::runtime_error("无法完成 Fourier 系数 SHA-256");
+  }
+  std::ostringstream hexadecimal;
+  hexadecimal << std::hex << std::setfill('0');
+  for (unsigned int index = 0; index < digest_size; ++index) {
+    hexadecimal << std::setw(2) << static_cast<unsigned>(digest[index]);
+  }
+  return hexadecimal.str();
 }
 
 fs::path defaultRecordFile() {
@@ -108,7 +167,8 @@ ExperimentConfig defaultExperimentConfigForRobot(const std::string &robot) {
   if (robot == "piper") {
     config.controller_config =
         repoRoot() / "config" / "piper_force_controller_node.yaml";
-    config.scene_path = repoRoot() / "piper" / "scene.xml";
+    config.scene_path = repoRoot() / "piper" / "scene_identification.xml";
+    config.sim_config = repoRoot() / "config" / "piper_sim_node.yaml";
     config.collision_model = repoRoot() / "piper" / "piper.xml";
     return config;
   }
@@ -201,12 +261,24 @@ int main(int argc, char **argv) {
         experiment_config.collision_model);
     const fs::path output_csv =
         readArgPath(argc, argv, "--output", defaultRecordFile());
+    const fs::path trajectory_input =
+        readArgPath(argc, argv, "--trajectory-input", {});
+    const fs::path trajectory_output = readArgPath(
+        argc, argv, "--trajectory-output", defaultTrajectoryFile(output_csv));
     const bool headless = hasFlag(argc, argv, "--headless");
 
     auto controller_config = force_node::ForceController::loadConfig(force_config);
+    if (const auto seed = readArgUnsigned(argc, argv, "--trajectory-seed")) {
+      controller_config.trajectory_seed = *seed;
+    }
+    if (!trajectory_input.empty()) {
+      controller_config.trajectory_coefficients_file = trajectory_input;
+    }
     force_node::ForceController controller(controller_config, collision_model);
-    app::ExperimentRecorder recorder(output_csv, controller.armDOF());
+    controller.saveTrajectoryCoefficients(trajectory_output);
+    const std::string trajectory_sha256 = sha256File(trajectory_output);
     std::unique_ptr<app::ExperimentBackend> backend;
+    std::vector<double> joint_frictionloss;
 
     if (experiment_config.backend == "piper_real") {
       if (experiment_config.robot != "piper") {
@@ -217,13 +289,23 @@ int main(int argc, char **argv) {
           experiment_config.hardware_config, 1.0 / controller.controlRateHz());
     } else {
       auto sim_config_loaded = sim_com_node::PandaSimulator::loadConfig(sim_config);
+      joint_frictionloss = sim_config_loaded.joint_frictionloss;
       sim_config_loaded.enable_viewer =
           !headless && sim_config_loaded.enable_viewer;
       backend = std::make_unique<app::SimulationBackend>(
           sim_config_loaded, scene_path, controller.armDOF());
     }
 
-    const double end_time = controller.trajectoryDuration() + 2.0;
+    app::ExperimentRecorder recorder(
+        output_csv, controller.armDOF(), experiment_config.backend == "sim");
+    recorder.writeMetadata(app::ExperimentMetadata{
+        experiment_config.robot, experiment_config.backend, scene_path,
+        force_config, sim_config, backend->timeStep(), controller.trajectorySeed(),
+        controller.trajectoryHarmonics(), controller.acceptedTrajectoryScale(),
+        controller.acceptedTrajectoryAttempt(), controller.trajectoryReplayFile(),
+        trajectory_output, trajectory_sha256, joint_frictionloss});
+
+    const double end_time = controller.trajectoryDuration();
     auto state = backend->initialize();
     while (backend->simulationTime() < end_time) {
       force_node::JointSample sample{state.position, state.velocity, state.effort};

@@ -1,0 +1,5 @@
+# Piper simulation with explicit dry-friction truth for the final validation.
+simulation_rate_hz: 1000.0
+enable_viewer: false
+initial_keyframe: "identification_home"
+joint_frictionloss: [0.20, 0.20, 0.15, 0.10, 0.08, 0.05]

@@ -13,8 +13,18 @@ ExperimentState SimulationBackend::initialize() {
 
 ExperimentState
 SimulationBackend::step(const force_node::ControlCommand &command) {
-  simulator_.step(command.torque, command.saturated);
-  return convertState(simulator_.currentState());
+  const auto simulator_truth =
+      simulator_.step(command.torque, command.saturated);
+  ExperimentState state = convertState(simulator_.currentState());
+  state.simulation_truth = SimulationStepTruth{
+      simulator_truth.time_begin,
+      simulator_truth.position,
+      simulator_truth.velocity,
+      simulator_truth.acceleration,
+      simulator_truth.actuator_effort,
+      simulator_truth.constraint_effort,
+      simulator_truth.contact_count};
+  return state;
 }
 
 double SimulationBackend::simulationTime() const {
@@ -27,7 +37,8 @@ double SimulationBackend::timeStep() const {
 
 ExperimentState
 SimulationBackend::convertState(const sim_com_node::JointState &state) {
-  return ExperimentState{state.position, state.velocity, state.effort};
+  return ExperimentState{state.position, state.velocity, state.effort,
+                         std::nullopt};
 }
 
 } // namespace app

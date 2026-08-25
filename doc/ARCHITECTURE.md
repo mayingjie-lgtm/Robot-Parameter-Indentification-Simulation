@@ -6,6 +6,8 @@
 >
 > 本文同时包含“当前代码事实”和“目标数据契约”。凡是两者不一致的地方，必须显式标注；如果本文与可重复运行的当前代码冲突，以 `AGENTS.md` 定义的 source-of-truth 顺序为准，先报告差异，不得把目标态当成已经实现。
 
+> 2026-08-24 状态：完整 Piper 固定夹爪的 Phase 3 闭环已经实现并通过门禁。本文中保留的 Phase 1 历史问题应结合 [`PHASE3_PIPER_BASELINE.md`](PHASE3_PIPER_BASELINE.md) 阅读；以下“当前实现”段落已按新数据契约更新。
+
 ---
 
 # 1. 项目目标
@@ -146,25 +148,20 @@ T = W\beta
 
 ## 4.0 当前统一实验链路的真实数据语义
 
-截至当前 Phase 1 审计，`run_experiment -> ExperimentRecorder -> CSV` 的实际行为是：
+当前 `run_experiment -> ExperimentRecorder -> CSV` 在仿真 backend 下的实际行为是：
 
 | CSV / state 字段 | 当前来源 | 当前语义 |
 |---|---|---|
-| `q` | `ExperimentState.position`；仿真来自 MuJoCo `qpos` | 关节位置 |
-| `qd` | `ExperimentState.velocity`；仿真来自 MuJoCo `qvel` | 关节速度 |
-| `qdd` | `ExperimentRecorder` 对相邻 `state.velocity` 做一阶差分 | 数值微分加速度，不是当前统一链路中的 MuJoCo `qacc` |
-| CSV `tau` | `ControlCommand.torque` | 命令力矩 `tau_cmd`，不是 `state.effort` |
-| `state.effort`（sim） | MuJoCo `qfrc_actuator` | actuator reported effort，当前未写入统一 CSV |
-| `state.effort`（Piper real） | Piper SDK bridge 返回的 effort | SDK reported effort，当前未写入统一 CSV |
+| `q0..` / `qd0..` | MuJoCo pre-integration `qpos` / `qvel` | 区间起点状态 |
+| `qdd_mujoco0..` | 同一步 forward dynamics 的 MuJoCo `qacc` | 仿真辨识加速度真值 |
+| `qdd_diff0..` | `(qd_next-qd)/(time_end-time_begin)` | 前向速度差分，仅用于误差诊断 |
+| `tau_cmd0..` | `ControlCommand.torque` | 命令力矩 |
+| `tau_effort0..` | 同一步 MuJoCo `qfrc_actuator` | actuator 广义力；当前 unit gear 未饱和时等于命令 |
+| `tau_constraint0..` | MuJoCo `qfrc_constraint` | 接触、限位、equality 或 frictionloss 的约束力 |
+| `q_next0..` / `qd_next0..` | 积分后的 `qpos` / `qvel` | 区间终点状态 |
+| `saturated` / `contact_count` | controller / MuJoCo | 显式质量标记，不静默丢弃 |
 
-因此当前 CSV 中的通用列名 `qdd` 和 `tau` **不能仅凭列名推断数据来源**。特别是：
-
-```text
-CSV 存在 qdd 列 != qdd 来自 physics engine
-CSV tau != 已证明的实际关节扭矩
-```
-
-这两点属于 Phase 1 需要优先确认和修正的数据可信度问题。
+仿真 schema 使用 17 位有效数字并生成 `.meta.yaml`。真机 backend 仍保留 legacy `qdd/tau` schema，并在 metadata 中标记 `legacy_ambiguous_schema`；不能把真机 legacy 列解释成上述 MuJoCo 真值。
 
 ## 4.1 q
 
@@ -214,13 +211,10 @@ filtered
 含义：关节加速度
 ```
 
-**当前实现：**统一 `ExperimentRecorder` 对相邻速度样本做一阶差分，仿真和真机都走这一路径。
-
-**目标数据契约：**
+**当前实现：**仿真同时记录 `qdd_mujoco` 与 `qdd_diff`，正式仿真辨识显式选择前者；真机 legacy schema 仍使用速度差分。
 
 ```text
-仿真：
-优先记录 MuJoCo qacc，并明确 source=sim_qacc
+仿真：qdd_mujoco = MuJoCo qacc（pre-integration）
 
 真机：
 优先离线对 q / qd 做滤波和求导，并明确 preprocessing 方法
@@ -306,15 +300,16 @@ reported effort
 提供统一的 step / initialize 接口
 ```
 
-当前 `ExperimentState` 实际只包含：
+当前 `ExperimentState` 包含：
 
 ```text
 position
 velocity
 effort
+optional simulation_truth
 ```
 
-时间由 backend 的 `simulationTime()` / `timeStep()` 单独提供；当前接口**没有直接传递 qdd 或原始硬件 timestamp**。
+`simulation_truth` 只由仿真 backend 填充，包含区间起点时间、pre-integration `q/qd/qacc/qfrc_actuator/qfrc_constraint` 和接触数；真实 Piper backend 的返回语义未改变。时间仍由 backend 的 `simulationTime()` / `timeStep()` 提供。
 
 目标上，如果后续为了保留真实数据来源而扩展接口，可以显式增加 `qdd`、timestamp 或 source metadata，但必须由实际需求驱动，不能为了形式统一提前扩展。
 
@@ -338,14 +333,7 @@ reBot real（未来）
 把状态和命令按明确物理语义写入文件
 ```
 
-当前实现仍有两处待收口：
-
-```text
-qdd = velocity finite difference
-tau = command.torque
-```
-
-而 CSV header 只写 `qdd` / `tau`，没有携带 source metadata。因此当前实现尚未完全达到“Recorder 记录事实且不猜测数据”的目标。
+仿真 schema 已按 `qdd_mujoco/qdd_diff/tau_cmd/tau_effort/tau_constraint` 分列，并通过 sidecar metadata 记录来源。真机 legacy schema 仍需在进入真实参数辨识前单独完成传感器来源和预处理契约。
 
 Recorder 不应负责：
 
@@ -364,9 +352,7 @@ Recorder 不应负责：
 
 ## 5.4 DataLoader / Preprocessing
 
-当前 `DataLoader` 负责读取固定 CSV schema，并根据是否存在 `qdd` 列决定是否需要后续数值微分；当前还没有真正的 `torque source` 选择机制。
-
-已知问题：当前 loader 只要检测到 `qdd` 列，就会把它描述为“from physics engine”，但统一 `ExperimentRecorder` 生成的 `qdd` 实际来自速度差分。这个描述不能作为数据来源证据。
+当前 `DataLoader` 按配置中的精确 header 前缀读取 position、velocity、acceleration 和 torque；缺列、重复列或不完整关节列组直接报错，不再按列数猜测来源。正式辨识只依据 finite、`saturated`、`contact_count` 和已知约束语义筛选数据，不再使用 `qdd < 10` 之类隐式阈值。
 
 目标职责：
 
@@ -435,13 +421,13 @@ MuJoCo
 
 ## 5.7 Evaluation
 
-当前 `identify` 将同一 CSV 按时间顺序切分为前 80% training、后 20% validation，然后计算：
+当前 Piper 正式模式要求不同路径的 trajectory A training CSV 与 trajectory B validation CSV，然后计算：
 
 ```text
 tau_hat = W beta_hat
 ```
 
-这属于**同一条激励轨迹内部的 hold-out validation**，还不是最终目标中的独立验证轨迹。
+训练 A 定义固定的列缩放、SVD 数值秩和基础参数方向；所有噪声/IRLS 实验复用这组基础坐标，B 始终保持干净且不参与估计。
 
 目标重点指标：
 

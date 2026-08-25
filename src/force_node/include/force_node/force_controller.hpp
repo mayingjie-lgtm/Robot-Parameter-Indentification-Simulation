@@ -5,6 +5,7 @@
 #include "trajectory/fourier_trajectory.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -20,6 +21,10 @@ enum class ControllerMode {
 struct ForceControllerConfig {
   double control_rate_hz = 1000.0;
   double trajectory_duration = 30.0;
+  std::size_t trajectory_harmonics = 5;
+  std::uint32_t trajectory_seed = 20260824U;
+  double trajectory_coefficient_scale = 0.04;
+  std::filesystem::path trajectory_coefficients_file;
   std::vector<double> kp = {450.0, 450.0, 450.0, 450.0, 180.0, 100.0, 40.0};
   std::vector<double> kd = {35.0, 35.0, 35.0, 35.0, 20.0, 18.0, 10.0};
   std::vector<double> target_position = {0.0, 0.0, 0.0, -1.57079,
@@ -59,6 +64,32 @@ public:
   bool isTorqueSaturated() const { return torque_saturated_; }
   double trajectoryDuration() const { return trajectory_duration_; }
 
+  /** Save the accepted or replayed Fourier coefficients to a CSV file. */
+  void saveTrajectoryCoefficients(const std::filesystem::path &path) const;
+
+  /** Return the seed used by the deterministic safety search. */
+  std::uint32_t trajectorySeed() const { return config_.trajectory_seed; }
+
+  /** Return the configured number of Fourier harmonics. */
+  std::size_t trajectoryHarmonics() const {
+    return config_.trajectory_harmonics;
+  }
+
+  /** Return the accepted one-based search attempt, or zero for replay. */
+  std::size_t acceptedTrajectoryAttempt() const {
+    return accepted_trajectory_attempt_;
+  }
+
+  /** Return the coefficient scale used by the accepted safety-search attempt. */
+  double acceptedTrajectoryScale() const {
+    return accepted_trajectory_scale_;
+  }
+
+  /** Return the configured replay file, empty when coefficients were generated. */
+  const std::filesystem::path &trajectoryReplayFile() const {
+    return config_.trajectory_coefficients_file;
+  }
+
 private:
   bool checkTrajectory(const trajectory::FourierTrajectory &traj);
   void initExcitationTrajectory();
@@ -81,6 +112,8 @@ private:
   bool torque_saturated_{false};
   std::size_t total_samples_{0};
   std::size_t saturated_samples_{0};
+  std::size_t accepted_trajectory_attempt_{0};
+  double accepted_trajectory_scale_{0.0};
 };
 
 } // namespace force_node

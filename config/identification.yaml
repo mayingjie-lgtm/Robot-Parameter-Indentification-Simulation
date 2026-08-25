@@ -1,7 +1,13 @@
-# 无 ROS 参数辨识配置
-# robot 可选: panda / piper
 robot: "piper"
-# algorithm: 0 表示跑完整基准；1-8 分别对应 OLS/WLS/IRLS/TLS/EKF/ML/CLOE/NLS_FRICTION
-algorithm: 0
-data_file: "data/benchmark_data.csv"
-output_file: "results/identification.yaml"
+algorithm: 1
+training_data_file: "data/phase3/piper_trajectory_A.csv"
+validation_data_file: "data/phase3/piper_trajectory_B.csv"
+basis_data_file: "data/phase3/piper_trajectory_A.csv"
+model_file: "piper/piper.xml"
+position_prefix: "q"
+velocity_prefix: "qd"
+acceleration_prefix: "qdd_mujoco"
+torque_prefix: "tau_effort"
+constraint_tolerance: 1e-10
+rank_relative_tolerance: 1e-6
+output_file: "results/piper_phase3_clean.yaml"

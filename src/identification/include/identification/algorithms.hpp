@@ -65,9 +65,17 @@ public:
   Eigen::VectorXd solve(const Eigen::MatrixXd &W,
                         const Eigen::VectorXd &Tau_meas) override;
 
+  /** Return the final Huber weights in observation-row order. */
+  const Eigen::VectorXd &lastWeights() const { return last_weights_; }
+
+  /** Return the number of completed reweighting iterations. */
+  int iterations() const { return iterations_; }
+
 private:
   int max_iter_;
   double tol_;
+  Eigen::VectorXd last_weights_;
+  int iterations_{0};
 };
 
 /**

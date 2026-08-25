@@ -1,0 +1,15 @@
+robot: "piper"
+algorithm: 1
+training_data_file: "data/phase3/piper_trajectory_A_friction.csv"
+validation_data_file: "data/phase3/piper_trajectory_B_friction.csv"
+basis_data_file: "data/phase3/piper_trajectory_A_friction.csv"
+model_file: "piper/piper.xml"
+position_prefix: "q"
+velocity_prefix: "qd"
+acceleration_prefix: "qdd_mujoco"
+torque_prefix: "tau_effort"
+constraint_tolerance: 1e-10
+rank_relative_tolerance: 1e-6
+friction_velocity_threshold: 0.05
+joint_frictionloss: [0.20, 0.20, 0.15, 0.10, 0.08, 0.05]
+output_file: "results/piper_phase3_friction.yaml"

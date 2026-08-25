@@ -4,7 +4,12 @@
  */
 
 #include "trajectory/fourier_trajectory.hpp"
-#include <random>
+
+#include <fstream>
+#include <iomanip>
+#include <sstream>
+#include <stdexcept>
+#include <vector>
 
 namespace trajectory {
 
@@ -100,19 +105,102 @@ Eigen::VectorXd FourierTrajectory::getParameterVector() const {
   return x;
 }
 
-void FourierTrajectory::setRandomCoefficients(double amplitude) {
-  std::random_device rd;
-  std::mt19937 gen(rd());
-  std::uniform_real_distribution<> dis(-amplitude, amplitude);
-
+void FourierTrajectory::setRandomCoefficients(double amplitude,
+                                              std::mt19937 &generator) {
   for (std::size_t i = 0; i < params_.n_dof; ++i) {
     for (std::size_t j = 0; j < params_.n_harmonics; ++j) {
-      params_.A(i, j) = dis(gen);
-      params_.B(i, j) = dis(gen);
+      // The explicit integer-to-double mapping is reproducible across standard
+      // library implementations, unlike uniform_real_distribution.
+      const double unit_a = static_cast<double>(generator()) /
+                            static_cast<double>(generator.max());
+      const double unit_b = static_cast<double>(generator()) /
+                            static_cast<double>(generator.max());
+      params_.A(i, j) = amplitude * (2.0 * unit_a - 1.0);
+      params_.B(i, j) = amplitude * (2.0 * unit_b - 1.0);
     }
   }
 
   applyInitialConditionConstraints();
+}
+
+void FourierTrajectory::saveCoefficients(
+    const std::filesystem::path &path) const {
+  if (path.has_parent_path()) {
+    std::filesystem::create_directories(path.parent_path());
+  }
+  std::ofstream output(path);
+  if (!output) {
+    throw std::runtime_error("Unable to save Fourier coefficients: " +
+                             path.string());
+  }
+  output << "joint,harmonic,omega,q0,A,B\n" << std::setprecision(17);
+  for (std::size_t joint = 0; joint < params_.n_dof; ++joint) {
+    for (std::size_t harmonic = 0; harmonic < params_.n_harmonics;
+         ++harmonic) {
+      output << joint << "," << harmonic << "," << params_.omega << ","
+             << params_.q0(static_cast<Eigen::Index>(joint)) << ","
+             << params_.A(static_cast<Eigen::Index>(joint),
+                          static_cast<Eigen::Index>(harmonic))
+             << ","
+             << params_.B(static_cast<Eigen::Index>(joint),
+                          static_cast<Eigen::Index>(harmonic))
+             << "\n";
+    }
+  }
+}
+
+void FourierTrajectory::loadCoefficients(
+    const std::filesystem::path &path) {
+  std::ifstream input(path);
+  if (!input) {
+    throw std::runtime_error("Unable to load Fourier coefficients: " +
+                             path.string());
+  }
+  std::string line;
+  if (!std::getline(input, line) || line != "joint,harmonic,omega,q0,A,B") {
+    throw std::runtime_error("Invalid Fourier coefficient CSV header");
+  }
+  std::vector<bool> seen(params_.n_dof * params_.n_harmonics, false);
+  std::size_t row = 1;
+  while (std::getline(input, line)) {
+    ++row;
+    std::stringstream stream(line);
+    std::vector<std::string> values;
+    std::string value;
+    while (std::getline(stream, value, ',')) {
+      values.push_back(value);
+    }
+    if (values.size() != 6) {
+      throw std::runtime_error("Invalid Fourier coefficient row " +
+                               std::to_string(row));
+    }
+    const std::size_t joint = std::stoul(values[0]);
+    const std::size_t harmonic = std::stoul(values[1]);
+    if (joint >= params_.n_dof || harmonic >= params_.n_harmonics) {
+      throw std::runtime_error("Fourier coefficient index is out of range");
+    }
+    const double omega = std::stod(values[2]);
+    const double q0 = std::stod(values[3]);
+    if (omega != params_.omega ||
+        q0 != params_.q0(static_cast<Eigen::Index>(joint))) {
+      throw std::runtime_error(
+          "Fourier coefficient metadata does not match controller config");
+    }
+    const std::size_t index = joint * params_.n_harmonics + harmonic;
+    if (seen[index]) {
+      throw std::runtime_error("Duplicate Fourier coefficient row");
+    }
+    seen[index] = true;
+    params_.A(static_cast<Eigen::Index>(joint),
+              static_cast<Eigen::Index>(harmonic)) = std::stod(values[4]);
+    params_.B(static_cast<Eigen::Index>(joint),
+              static_cast<Eigen::Index>(harmonic)) = std::stod(values[5]);
+  }
+  for (const bool present : seen) {
+    if (!present) {
+      throw std::runtime_error("Fourier coefficient CSV is incomplete");
+    }
+  }
 }
 
 void FourierTrajectory::applyInitialConditionConstraints() {

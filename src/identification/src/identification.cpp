@@ -29,8 +29,15 @@ MuJoCoParamFlags effectiveFlagsForAlgorithm(const std::string &algorithm_type,
 } // namespace
 
 Identification::Identification(const std::string &robot_type,
+                               const std::filesystem::path &piper_model_path,
+                               const std::vector<double> &piper_frictionloss,
                                std::unique_ptr<robot::RobotModel> model)
-    : model_(std::move(model)), robot_type_(normalizeRobotType(robot_type)) {}
+    : model_(std::move(model)), robot_type_(normalizeRobotType(robot_type)),
+      piper_regressor_(piper_model_path.empty()
+                            ? std::filesystem::path(PROJECT_ROOT_DIR) / "piper" /
+                                  "piper.xml"
+                            : piper_model_path,
+                        {0.035, -0.035}, piper_frictionloss) {}
 
 void Identification::preprocess(ExperimentData &data) {
   if (data.qdd.rows() == static_cast<Eigen::Index>(data.n_samples) &&
@@ -106,47 +113,24 @@ Eigen::VectorXd Identification::solve(const ExperimentData &data,
                                         : "MuJoCoRegressor")
             << ")..." << std::endl;
 
-  const double qdd_threshold = 10.0;
-  std::vector<std::size_t> valid_indices;
-  valid_indices.reserve(data.n_samples);
-
-  for (std::size_t i = 0; i < data.n_samples; ++i) {
-    if (data.qdd.row(static_cast<Eigen::Index>(i)).cwiseAbs().maxCoeff() <
-        qdd_threshold) {
-      valid_indices.push_back(i);
-    }
-  }
-
-  if (valid_indices.empty()) {
+  if (!data.q.allFinite() || !data.qd.allFinite() || !data.qdd.allFinite() ||
+      !data.tau.allFinite()) {
     throw std::runtime_error(
-        "No valid samples remaining after filtering outliers!");
+        "Identification::solve received non-finite data; filter by explicit "
+        "quality fields before solving");
   }
 
-  std::cout << "Filtered " << (data.n_samples - valid_indices.size())
-            << " outlier samples. " << valid_indices.size()
-            << " valid samples remain." << std::endl;
-
-  Eigen::MatrixXd q_valid(valid_indices.size(), data.n_dof);
-  Eigen::MatrixXd qd_valid(valid_indices.size(), data.n_dof);
-  Eigen::MatrixXd qdd_valid(valid_indices.size(), data.n_dof);
-  Eigen::VectorXd tau_meas(valid_indices.size() * data.n_dof);
-
-  for (std::size_t k = 0; k < valid_indices.size(); ++k) {
-    const std::size_t idx = valid_indices[k];
-    q_valid.row(static_cast<Eigen::Index>(k)) =
-        data.q.row(static_cast<Eigen::Index>(idx));
-    qd_valid.row(static_cast<Eigen::Index>(k)) =
-        data.qd.row(static_cast<Eigen::Index>(idx));
-    qdd_valid.row(static_cast<Eigen::Index>(k)) =
-        data.qdd.row(static_cast<Eigen::Index>(idx));
-    for (std::size_t j = 0; j < data.n_dof; ++j) {
-      tau_meas(static_cast<Eigen::Index>(k * data.n_dof + j)) =
-          data.tau(static_cast<Eigen::Index>(idx), static_cast<Eigen::Index>(j));
+  Eigen::VectorXd tau_meas(data.n_samples * data.n_dof);
+  for (std::size_t sample = 0; sample < data.n_samples; ++sample) {
+    for (std::size_t joint = 0; joint < data.n_dof; ++joint) {
+      tau_meas(static_cast<Eigen::Index>(sample * data.n_dof + joint)) =
+          data.tau(static_cast<Eigen::Index>(sample),
+                   static_cast<Eigen::Index>(joint));
     }
   }
 
   const Eigen::MatrixXd W = computeObservationMatrix(
-      q_valid.transpose(), qd_valid.transpose(), qdd_valid.transpose(),
+      data.q.transpose(), data.qd.transpose(), data.qdd.transpose(),
       effectiveFlagsForAlgorithm(algorithm_type, flags));
 
   std::cout << "W size: " << W.rows() << " x " << W.cols() << std::endl;
@@ -161,7 +145,7 @@ Eigen::VectorXd Identification::solve(const ExperimentData &data,
 
   if (auto *nonlinear_solver =
           dynamic_cast<identification::NonlinearFrictionLM *>(solver.get())) {
-    nonlinear_solver->setVelocityData(qd_valid);
+    nonlinear_solver->setVelocityData(data.qd);
   }
 
   std::cout << "Solving using " << algorithm_type << "..." << std::endl;

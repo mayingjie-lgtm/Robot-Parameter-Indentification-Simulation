@@ -3,6 +3,8 @@
 > 本文档用于整理动力学建模、激励轨迹、参数辨识、算法评估和调试经验，主要承担**数学与算法背景手册**的角色。
 >
 > 当前工程架构、数据字段真实来源和阶段状态以根目录 `AGENTS.md`、`doc/ARCHITECTURE.md` 和 `doc/PHASE1_BASELINE.md` 为准。本文若与当前代码或这些文档冲突，应视为历史描述并进行增量修正，不能作为当前实现的最高优先级 source of truth。
+>
+> 2026-08-24：完整 Piper 仿真闭环的实际结果和复现入口见 `doc/PHASE3_PIPER_BASELINE.md`。
 
 本文重点整合了以下主题：
 
@@ -69,7 +71,7 @@ run_experiment
        ExperimentRecorder
              |
              v
-        data/benchmark_data.csv
+        data/phase3/trajectory_A.csv + trajectory_B.csv
              |
              v
           identify
@@ -77,7 +79,7 @@ run_experiment
              +--> 预处理
              +--> 构造观测矩阵 W
              +--> 求解参数
-             +--> hold-out 验证
+             +--> 独立轨迹 B 验证
              v
       results/identification.yaml
 ```
@@ -154,22 +156,25 @@ $$
 
 ### 2.3 数据文件格式
 
-实验记录文件采用 CSV 格式，典型列为：
+仿真记录文件采用明确区分积分前后状态的 CSV schema：
 
 ```text
-time, q0..q(n-1), qd0..qd(n-1), [qdd0..qdd(n-1)], tau0..tau(n-1)
+time_begin,time_end,
+q0..,qd0..,qdd_mujoco0..,qdd_diff0..,
+tau_cmd0..,tau_effort0..,tau_constraint0..,
+q_next0..,qd_next0..,saturated,contact_count
 ```
 
-当前统一 `run_experiment -> ExperimentRecorder` 链路的真实来源是：
+仿真 `run_experiment -> ExperimentRecorder` 链路的真实来源是：
 
-- `q`：来自 `ExperimentState.position`；仿真时对应 MuJoCo `qpos`
-- `qd`：来自 `ExperimentState.velocity`；仿真时对应 MuJoCo `qvel`
-- `qdd`：`ExperimentRecorder` 对相邻 `state.velocity` 做一阶差分
-- CSV `tau`：来自 `ControlCommand.torque`
+- `q/qd`：积分区间起点的 MuJoCo `qpos/qvel`
+- `qdd_mujoco`：同一 pre-integration 状态的 MuJoCo `qacc`
+- `qdd_diff`：`(qd_next-qd)/dt`，只用于数值差分误差诊断
+- `tau_cmd`：`ControlCommand.torque`
+- `tau_effort`：MuJoCo `qfrc_actuator`
+- `tau_constraint`：MuJoCo `qfrc_constraint`
 
-MuJoCo simulator 内部确实能够访问 `qacc` 和 `qfrc_actuator`，但当前统一 recorder 并没有把这两者按原始物理来源直接写入 CSV。
-
-因此当前项目里 CSV `tau` 的含义应明确为 **command torque (`tau_cmd`)**，不能默认解释为真实测得关节力矩；CSV 中存在 `qdd` 列也不能作为“来自 MuJoCo qacc”的证据。
+正式仿真辨识显式使用 `qdd_mujoco` 和 `tau_effort`。真实 Piper backend 仍使用带 `legacy_ambiguous_schema` metadata 的旧格式，其 `qdd/tau` 不能按仿真真值解释。
 
 ---
 
@@ -224,12 +229,12 @@ $$
 结合当前辨识实现，系统使用如下简化模型：
 
 $$
-\tau = M(q)\ddot{q} + C(q,\dot{q})\dot{q} + g(q) - D\dot{q}
+\tau_{act} = M(q)\ddot{q} + C(q,\dot{q})\dot{q} + g(q) + D\dot{q}
 $$
 
 其中：
 
-- $D = \mathrm{diag}(d_1,\dots,d_n)$ 为关节阻尼矩阵；
+- $qfrc_{passive}=-D\dot q$，因此维持目标运动所需的 actuator compensation 是 $+D\dot q$；
 - `armature` 直接加到惯性矩阵对角线上；
 - 线性 damping 被显式写入辨识模型；
 - 非线性摩擦模型仅在 `NLS_FRICTION` 中额外引入。
@@ -249,7 +254,7 @@ $$
 则 `qfrc_constraint` 会显著改变系统真实受力。此时再用
 
 $$
-\tau \approx M(q)\ddot{q} + C(q,\dot{q})\dot{q} + g(q) - D\dot{q}
+\tau_{act} \approx M(q)\ddot{q} + C(q,\dot{q})\dot{q} + g(q) + D\dot{q}
 $$
 
 去拟合数据，就会把约束力误吸收到参数里，导致结果失真。这就是为什么
@@ -294,7 +299,7 @@ $$
 \tau =
 Y(q,\dot{q},\ddot{q})\theta
 + A\ddot{q}
-- D\dot{q}
++ D\dot{q}
 $$
 
 进一步合并可得：
@@ -628,28 +633,11 @@ $$
 
 ### 7.3 离群样本过滤
 
-为抑制速度或位置抖动经差分放大后的假加速度，系统对样本施加阈值过滤：
-
-$$
-\|\ddot{q}(t_i)\|_\infty < \ddot{q}_{max}
-$$
-
-当前实现中常用：
-
-$$
-\ddot{q}_{max} = 10.0 \text{ rad/s}^2
-$$
-
-过滤的目的不是“让数据更好看”，而是避免少量异常点主导最小二乘目标函数。
+当前正式仿真辨识不再使用 `qdd < 10` 之类隐式阈值。样本级只排除非有限值、饱和、接触或不符合已知物理语义的约束力；异常观测通过可复现的噪声数据和 IRLS 权重显式研究。
 
 ### 7.4 训练集与验证集
 
-当前 `identify` 按同一条 CSV 的时间顺序划分：
-
-- 训练集：前 80%
-- 验证集：后 20%
-
-这属于 **same-run temporal hold-out validation**。它比直接报告训练误差更有意义，但仍不能替代独立激励轨迹验证。正式实验应使用辨识轨迹 A 估计参数，再使用独立轨迹 B 评价 torque prediction。
+当前 `identify` 要求不同路径的轨迹 A 与轨迹 B：A 只定义 SVD 基础空间和估计参数，B 只评价逐关节 torque prediction。噪声实验只污染 A，并复用干净 A 的基础方向。
 
 ---
 
@@ -781,6 +769,14 @@ $$
 ---
 
 ## 9. 非线性摩擦辨识
+
+当前可信基线先验证 MuJoCo plant 中明确配置的 `frictionloss`：
+
+$$
+\tau_c = F_c\,\mathrm{sign}(\dot q), \qquad |\dot q|\ge 0.05\,\mathrm{rad/s}
+$$
+
+它为 Piper 回归器增加六个线性列，使参数从 72 增至 78。只有这个带已知 plant 真值的 OLS 闭环通过后，才有资格讨论下面的 tanh 非线性模型；当前 `NLS_FRICTION` 不属于 Phase 3 通过条件。
 
 ### 9.1 为什么需要非线性摩擦模型
 
@@ -1003,17 +999,15 @@ $$
 在当前项目里，需要特别小心阻尼与摩擦项的符号：
 
 $$
-\tau = M\ddot{q} + C\dot{q} + g - D\dot{q}
+\tau_{act} = M\ddot{q} + C\dot{q} + g + D\dot{q}
 $$
 
 如果数据记录端、逆动力学端和回归矩阵端对 damping 的符号定义不一致，
 则辨识结果会出现“残差很小，但 damping 参数整体为负”的现象。
 
-### 11.4 command torque 与“真实动力学力矩”不完全等价
+### 11.4 command torque 与 actuator effort 必须分列
 
-当前统一 recorder 记录的是 `ControlCommand.torque`。在 simulation backend 中，这个命令随后被写入 MuJoCo actuator control，因此在当前简单 motor 配置下与 `data->ctrl` 紧密对应，但它仍不是 `qfrc_bias`、`qfrc_inverse`、`qfrc_actuator` 或完整广义力分解项的直接测量。
-
-因此辨识结果当前实际上是在拟合一个“控制命令下的等效动力学”数据集，不能未经验证就称为真实关节力矩辨识。
+仿真 CSV 同时记录 `tau_cmd` 与 MuJoCo `qfrc_actuator` 对应的 `tau_effort`。当前 unit-gear motor 的未饱和样本中二者逐元素相等，但正式辨识仍显式选择 `tau_effort`，不能从执行器配置之外推断这种等价关系。
 
 ### 11.5 完整参数不等于最小参数
 
@@ -1028,7 +1022,7 @@ $$
 ### 12.1 主要可执行文件
 
 - `run_experiment`：执行激励轨迹并采样生成 CSV
-- `identify`：读取 CSV，运行单算法或完整 benchmark
+- `identify`：读取独立 A/B，运行无 ridge OLS 或 Huber IRLS，并输出固定基础参数空间和逐关节预测
 - `mujoco_identify`：快速执行一次 MuJoCo 回归辨识
 - `dynamics_diagnostic`：诊断动力学项和记录数据的差异
 - `model_comparison`：比较不同动力学模型

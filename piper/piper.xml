@@ -143,9 +143,10 @@
     </fixed>
   </tendon>
 
-  <!-- 夹爪等式约束：确保两个手指同步运动 -->
+  <!-- Opposed finger synchronization: joint7 = -joint8. -->
   <equality>
-    <joint joint1="joint7" joint2="joint8" solimp="0.95 0.99 0.001" solref="0.005 1"/>
+    <joint name="gripper_sync" joint1="joint7" joint2="joint8"
+      polycoef="0 -1 0 0 0" solimp="0.95 0.99 0.001" solref="0.005 1"/>
   </equality>
 
   <!-- 纯力矩控制模式：ctrl 直接作为关节力矩输入 (τ = ctrl) -->

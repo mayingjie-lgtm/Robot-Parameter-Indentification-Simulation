@@ -1,0 +1,4 @@
+# Piper identification simulation starts exactly at the Fourier q0 state.
+simulation_rate_hz: 1000.0
+enable_viewer: true
+initial_keyframe: "identification_home"

@@ -20,8 +20,10 @@ namespace mujoco_dynamics {
 enum class MuJoCoParamFlags : unsigned int {
   NONE = 0,
   ARMATURE = 1 << 0, ///< 电机反映惯量
-  DAMPING = 1 << 1,  ///< 粘性阻尼 (符号为负)
-  ALL = ARMATURE | DAMPING
+  DAMPING = 1 << 1,  ///< Required actuator compensation for viscous damping
+  FRICTION_LOSS = 1 << 2, ///< Required dry-friction actuator compensation
+  ALL = ARMATURE | DAMPING,
+  ALL_WITH_FRICTION = ARMATURE | DAMPING | FRICTION_LOSS
 };
 
 inline MuJoCoParamFlags operator|(MuJoCoParamFlags a, MuJoCoParamFlags b) {

@@ -5,24 +5,20 @@
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <stdexcept>
 
 namespace identification {
 
-// =============================================================================
-// 正则化求解辅助函数 (Tikhonov/Ridge Regression)
-// 正则化求解辅助函数 (Tikhonov/Ridge Regression)
-// =============================================================================
 namespace {
-const double kRegularizationLambda = 1e-6;
-
-inline Eigen::VectorXd solveRegularized(const Eigen::MatrixXd &W,
-                                        const Eigen::VectorXd &tau) {
-  // 使用正规方程 (Normal Equations) 方法。
-  // 在剔除离群点后，矩阵不再极度病态，LDLT 速度快且有效。
-  Eigen::MatrixXd WtW = W.transpose() * W;
-  WtW +=
-      kRegularizationLambda * Eigen::MatrixXd::Identity(WtW.rows(), WtW.cols());
-  return WtW.ldlt().solve(W.transpose() * tau);
+/** Solve an unregularized least-squares problem with an SVD pseudoinverse. */
+Eigen::VectorXd solveLeastSquares(const Eigen::MatrixXd &W,
+                                  const Eigen::VectorXd &tau) {
+  if (W.rows() != tau.size() || W.rows() == 0 || W.cols() == 0) {
+    throw std::runtime_error("Least-squares matrix dimensions are invalid");
+  }
+  Eigen::JacobiSVD<Eigen::MatrixXd> svd(
+      W, Eigen::ComputeThinU | Eigen::ComputeThinV);
+  return svd.solve(tau);
 }
 
 inline double clampPositive(double value, double min_value = 1e-6) {
@@ -37,6 +33,22 @@ inline double safeSechSquared(double x) {
   const double c = std::cosh(x);
   const double inv = 1.0 / c;
   return inv * inv;
+}
+
+/** Compute a scalar median without assuming an odd observation count. */
+double median(std::vector<double> values) {
+  if (values.empty()) {
+    return 0.0;
+  }
+  const std::size_t middle = values.size() / 2;
+  std::nth_element(values.begin(), values.begin() + middle, values.end());
+  const double upper = values[middle];
+  if (values.size() % 2 != 0) {
+    return upper;
+  }
+  const double lower =
+      *std::max_element(values.begin(), values.begin() + middle);
+  return 0.5 * (lower + upper);
 }
 } // namespace
 
@@ -81,15 +93,11 @@ createAlgorithm(const std::string &type, int dof) {
 }
 
 // =============================================================================
-// OLS (with Tikhonov Regularization / Ridge Regression)
+// OLS
 // =============================================================================
 Eigen::VectorXd OLS::solve(const Eigen::MatrixXd &W,
                            const Eigen::VectorXd &Tau_meas) {
-  // 使用 SVD 直接求解 OLS
-  // 这比正规方程 (Normal Equations) 方法更慢但数值上更稳定，
-  // 使用正则化求解以防止参数数值爆炸
-  // (即使数据已过滤，某些参数仍可能不可辨识导致秩亏)
-  return solveRegularized(W, Tau_meas);
+  return solveLeastSquares(W, Tau_meas);
 }
 
 // =============================================================================
@@ -99,8 +107,7 @@ WLS::WLS(int dof) : dof_(dof) {}
 
 Eigen::VectorXd WLS::solve(const Eigen::MatrixXd &W,
                            const Eigen::VectorXd &Tau_meas) {
-  // 使用正则化 OLS 计算初始估计
-  Eigen::VectorXd beta_ols = solveRegularized(W, Tau_meas);
+  Eigen::VectorXd beta_ols = solveLeastSquares(W, Tau_meas);
   Eigen::VectorXd residual = Tau_meas - W * beta_ols;
 
   int n_samples = Tau_meas.size() / dof_;
@@ -129,8 +136,7 @@ Eigen::VectorXd WLS::solve(const Eigen::MatrixXd &W,
     }
   }
 
-  // 使用正则化求解加权最小二乘
-  return solveRegularized(W_weighted, Tau_weighted);
+  return solveLeastSquares(W_weighted, Tau_weighted);
 }
 
 // =============================================================================
@@ -140,18 +146,23 @@ IRLS::IRLS(int max_iter, double tol) : max_iter_(max_iter), tol_(tol) {}
 
 Eigen::VectorXd IRLS::solve(const Eigen::MatrixXd &W,
                             const Eigen::VectorXd &Tau_meas) {
-  // 使用正则化 OLS 初始化
-  Eigen::VectorXd beta = solveRegularized(W, Tau_meas);
+  Eigen::VectorXd beta = solveLeastSquares(W, Tau_meas);
+  iterations_ = 0;
   for (int k = 0; k < max_iter_; ++k) {
     Eigen::VectorXd residual = Tau_meas - W * beta;
     Eigen::VectorXd weights(residual.size());
 
-    std::vector<double> abs_res(residual.size());
-    for (int i = 0; i < residual.size(); ++i)
-      abs_res[i] = std::abs(residual(i));
-    std::sort(abs_res.begin(), abs_res.end());
-    double median_res = abs_res[abs_res.size() / 2];
-    double sigma = median_res / 0.6745;
+    std::vector<double> residual_values(residual.size());
+    for (int i = 0; i < residual.size(); ++i) {
+      residual_values[static_cast<std::size_t>(i)] = residual(i);
+    }
+    const double residual_median = median(residual_values);
+    std::vector<double> deviations(residual.size());
+    for (int i = 0; i < residual.size(); ++i) {
+      deviations[static_cast<std::size_t>(i)] =
+          std::abs(residual(i) - residual_median);
+    }
+    const double sigma = median(std::move(deviations)) / 0.6745;
     double delta = 1.345 * sigma;
     if (delta < 1e-6)
       delta = 1e-6;
@@ -168,8 +179,9 @@ Eigen::VectorXd IRLS::solve(const Eigen::MatrixXd &W,
       W_w.row(i) *= w_sqrt;
       Tau_w(i) *= w_sqrt;
     }
-    // 使用正则化求解
-    Eigen::VectorXd beta_new = solveRegularized(W_w, Tau_w);
+    Eigen::VectorXd beta_new = solveLeastSquares(W_w, Tau_w);
+    last_weights_ = weights;
+    iterations_ = k + 1;
     if ((beta_new - beta).norm() < tol_) {
       beta = beta_new;
       break;
@@ -190,7 +202,7 @@ Eigen::VectorXd TLS::solve(const Eigen::MatrixXd &W,
   Eigen::JacobiSVD<Eigen::MatrixXd> svd(Z, Eigen::ComputeThinV);
   Eigen::VectorXd v_last = svd.matrixV().col(n_cols);
   if (std::abs(v_last(n_cols)) < 1e-9)
-    return solveRegularized(W, Tau_meas);
+    return solveLeastSquares(W, Tau_meas);
   return -v_last.head(n_cols) / v_last(n_cols);
 }
 
@@ -335,7 +347,7 @@ Eigen::VectorXd NonlinearFrictionLM::solve(const Eigen::MatrixXd &W_base,
   const Eigen::Index friction_count =
       static_cast<Eigen::Index>(frictionParameterCount(dof_));
 
-  const Eigen::VectorXd beta_linear = solveRegularized(W_base, Tau_meas);
+  const Eigen::VectorXd beta_linear = solveLeastSquares(W_base, Tau_meas);
   const Eigen::VectorXd residual_linear = Tau_meas - W_base * beta_linear;
 
   Eigen::VectorXd friction_init = Eigen::VectorXd::Zero(friction_count);

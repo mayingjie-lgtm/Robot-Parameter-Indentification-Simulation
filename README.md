@@ -42,7 +42,7 @@ cmake --build build --parallel
 
 - 读取 [`config/experiment.yaml`](config/experiment.yaml)
 - 按机器人选择对应 controller config，例如 [`config/force_controller_node.yaml`](config/force_controller_node.yaml) 或 [`config/piper_force_controller_node.yaml`](config/piper_force_controller_node.yaml)
-- 读取 [`config/panda_sim_node.yaml`](config/panda_sim_node.yaml)
+- 按机器人读取 simulator config；Piper 使用 [`config/piper_sim_node.yaml`](config/piper_sim_node.yaml)
 - 按机器人选择对应 MuJoCo scene
 - 在 `data/benchmark_data.csv` 输出采样数据
 
@@ -65,7 +65,7 @@ cmake --build build --parallel
 ./build/run_experiment --experiment-config config/experiment.yaml
 ```
 
-> **当前数据语义提醒（Phase 1）**：统一 `ExperimentRecorder` 当前将相邻 `state.velocity` 做差分写入 CSV `qdd`，并将 `command.torque` 写入 CSV `tau`。因此当前 CSV 的 `qdd` 不能直接称为 MuJoCo `qacc`，`tau` 也不能直接称为实际测得关节力矩。详细定义和目标数据契约见 [`doc/ARCHITECTURE.md`](doc/ARCHITECTURE.md)。
+仿真输出现在同时包含 `qdd_mujoco/qdd_diff` 与 `tau_cmd/tau_effort/tau_constraint`，并生成 `.meta.yaml`。真实 Piper backend 仍使用明确标为 `legacy_ambiguous_schema` 的旧格式。完整字段语义和可信 Piper 基线见 [`doc/PHASE3_PIPER_BASELINE.md`](doc/PHASE3_PIPER_BASELINE.md)。
 
 ### 5. 运行参数辨识
 
@@ -74,18 +74,14 @@ cmake --build build --parallel
 ```
 
 默认读取 [`config/identification.yaml`](config/identification.yaml)。
-其中 `robot` 字段可以在 `panda` 和 `piper` 之间切换，`identify` 会据此选择
-对应的自由度、动力学基准和回归矩阵构造方式。`panda` 使用 7 轴链路，
-`piper` 使用 6 轴链路。
+默认配置使用独立 Piper 轨迹 A 训练、轨迹 B 验证，按 header 名称选择 `q/qd/qdd_mujoco/tau_effort`。正式可信闭环当前只允许无 ridge OLS (`algorithm: 1`) 或 Huber IRLS (`algorithm: 3`)。
 
 可选参数：
 
 ```bash
 ./build/identify --config config/identification.yaml
-./build/identify --robot piper
-./build/identify --data-file data/benchmark_data.csv --algorithm 1
-./build/identify --data-file data/benchmark_data.csv --algorithm 8
-./build/mujoco_identify data/benchmark_data.csv
+./build/identify --config config/identification_friction.yaml
+python3 scripts/verify_phase3_gates.py
 ```
 
 ### 6. 运行 Piper 真机实验
@@ -199,15 +195,14 @@ run_experiment
 1. 后端返回当前关节状态。
 2. `ForceController` 根据当前时刻和关节状态计算统一控制命令。
 3. 后端执行一步仿真或一步真机命令下发。
-4. 共享记录器将 `q / qd / qdd / tau` 记录到 CSV，供后续辨识使用；当前 `qdd` 来源为速度差分，`tau` 来源为 `command.torque`，后续将按架构文档逐步收口数据来源语义。
+4. 仿真记录器将同一步的 pre-integration truth、post-integration state 和质量标记写入 CSV；真机记录器保持 legacy 语义。
 
 ---
 
 ## 主要可执行文件
 
 - `run_experiment`：统一实验入口，可选择 MuJoCo 仿真或 Piper 真机 backend，并生成 CSV
-- `identify`：读取 CSV，执行单算法或完整 benchmark
-  支持 `NLS_FRICTION` 非线性摩擦联合辨识（`--algorithm 8`）
+- `identify`：读取独立 A/B CSV，在固定 SVD 基础参数空间执行 OLS 或 IRLS
 - `mujoco_identify`：快速执行一次 MuJoCo 回归辨识
 - `dynamics_diagnostic`：对比动力学模型与记录数据
 - `model_comparison`：对比不同动力学模型

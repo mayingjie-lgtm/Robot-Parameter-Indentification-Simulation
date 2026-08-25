@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.21)
 project(robot_parameter_identification_simulation LANGUAGES CXX)
 
+enable_testing()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -17,6 +19,7 @@ else()
 endif()
 
 find_package(Eigen3 REQUIRED)
+find_package(OpenSSL REQUIRED)
 find_package(glfw3 REQUIRED)
 find_package(OpenMP)
 
@@ -134,6 +137,7 @@ target_link_libraries(run_experiment
   PRIVATE
     force_controller_core
     panda_simulator_core
+    OpenSSL::Crypto
 )
 
 add_executable(identify
@@ -160,3 +164,10 @@ add_executable(regressor_test
   src/identification/src/regressor_test.cpp
 )
 target_link_libraries(regressor_test PRIVATE identification_core)
+add_test(NAME piper_regressor_consistency COMMAND regressor_test)
+
+add_executable(fourier_trajectory_test
+  src/force_node/src/trajectory/fourier_trajectory_test.cpp
+)
+target_link_libraries(fourier_trajectory_test PRIVATE force_controller_core)
+add_test(NAME fourier_trajectory_reproducibility COMMAND fourier_trajectory_test)

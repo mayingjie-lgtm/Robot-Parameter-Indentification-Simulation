@@ -10,6 +10,8 @@
 
 #include "trajectory/trajectory_generator.hpp"
 #include <cmath>
+#include <filesystem>
+#include <random>
 
 namespace trajectory {
 
@@ -92,10 +94,17 @@ public:
   }
 
   /**
-   * @brief Set random coefficients (for optimization initialization)
+   * @brief Set deterministic random coefficients using a caller-owned stream.
    * @param amplitude Max amplitude for coefficients
+   * @param generator Persistent generator shared by every safety-search attempt
    */
-  void setRandomCoefficients(double amplitude = 0.1);
+  void setRandomCoefficients(double amplitude, std::mt19937 &generator);
+
+  /** Save all trajectory-defining values with round-trip floating precision. */
+  void saveCoefficients(const std::filesystem::path &path) const;
+
+  /** Load coefficients into this trajectory and validate its dimensions. */
+  void loadCoefficients(const std::filesystem::path &path);
 
   /**
    * @brief Apply initial condition constraints
