@@ -281,3 +281,24 @@ target_link_libraries(rebot_constraint_force_diagnostic
 target_compile_definitions(rebot_constraint_force_diagnostic
   PRIVATE PROJECT_ROOT_DIR="${PROJECT_ROOT_DIR}"
 )
+
+add_executable(rebot_identification_model_closure
+  src/identification/src/rebot_identification_model_closure.cpp
+)
+target_include_directories(rebot_identification_model_closure
+  PRIVATE
+    src/identification/include
+    src/force_node/include
+    src/sim_com_node/include
+    ${MUJOCO_INCLUDE_DIR}
+)
+target_link_libraries(rebot_identification_model_closure
+  PRIVATE
+    rebot_pinocchio_dynamics
+    force_controller_core
+    panda_simulator_core
+    ${MUJOCO_LIB}
+)
+target_compile_definitions(rebot_identification_model_closure
+  PRIVATE PROJECT_ROOT_DIR="${PROJECT_ROOT_DIR}"
+)

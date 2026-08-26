@@ -1,0 +1,18 @@
+robot: "rebot_dm"
+algorithm: 1
+training_data_file: "data/rebot_dm/excitation_A.csv"
+validation_data_file: "data/rebot_dm/excitation_B.csv"
+basis_data_file: "data/rebot_dm/excitation_A.csv"
+model_file: "rebot_dm/rebot_dm.urdf"
+position_prefix: "q"
+velocity_prefix: "qd"
+acceleration_prefix: "qdd_mujoco"
+torque_prefix: "tau_effort"
+constraint_tolerance: 1e-10
+rank_relative_tolerance: 1e-6
+friction_velocity_threshold: 0.05
+friction_observation_mode: "saturated_sliding"
+joint_armature: [0.020, 0.025, 0.018, 0.010, 0.008, 0.006]
+joint_damping: [0.040, 0.035, 0.030, 0.020, 0.015, 0.010]
+joint_frictionloss: [0.080, 0.070, 0.060, 0.040, 0.030, 0.020]
+output_file: "results/rebot_dm_clean_identification.yaml"

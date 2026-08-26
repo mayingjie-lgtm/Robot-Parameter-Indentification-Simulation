@@ -38,6 +38,7 @@ struct IdentificationConfig {
   double constraint_tolerance = 1e-10;
   double rank_relative_tolerance = 1e-6;
   double friction_velocity_threshold = 0.05;
+  std::string friction_observation_mode = "moving";
   std::vector<double> joint_armature;
   std::vector<double> joint_damping;
   std::vector<double> joint_frictionloss;
@@ -62,6 +63,21 @@ struct ErrorMetrics {
   double bias{0.0};
   double max_error{0.0};
   double r_squared{0.0};
+  std::size_t included_count{0};
+};
+
+struct ObservationSelection {
+  std::vector<Eigen::Index> rows;
+  std::vector<std::size_t> per_joint_counts;
+};
+
+struct AggregateError {
+  double rmse{0.0};
+  double max_error{0.0};
+  std::size_t included_count{0};
+  std::size_t worst_sample{0};
+  std::size_t worst_joint{0};
+  double worst_time{0.0};
 };
 
 struct RobustDiagnostics {
@@ -181,6 +197,8 @@ IdentificationConfig loadConfig(const fs::path &config_path) {
       config.columns.acceleration_prefix = value;
     } else if (parseString(line, "torque_prefix", value)) {
       config.columns.torque_prefix = value;
+    } else if (parseString(line, "friction_observation_mode", value)) {
+      config.friction_observation_mode = value;
     }
     parseDouble(line, "constraint_tolerance", config.constraint_tolerance);
     parseDouble(line, "rank_relative_tolerance",
@@ -255,11 +273,13 @@ std::size_t robotDof(const std::string &robot) {
   throw std::runtime_error("robot 仅支持 piper、rebot_dm 或 panda");
 }
 
-/** Keep only finite, unsaturated, contact-free, constraint-free samples. */
+/** Keep only finite, unsaturated, contact-free samples with valid constraints. */
 PreparedData selectValidSamples(const ExperimentData &source,
                                 double constraint_tolerance,
                                 const std::vector<double> &frictionloss = {},
-                                double friction_speed_threshold = 0.05) {
+                                double friction_speed_threshold = 0.05,
+                                const std::string &friction_observation_mode =
+                                    "moving") {
   std::vector<std::size_t> indices;
   indices.reserve(source.n_samples);
   for (std::size_t sample = 0; sample < source.n_samples; ++sample) {
@@ -280,7 +300,17 @@ PreparedData selectValidSamples(const ExperimentData &source,
       } else {
         const double velocity =
             source.qd(row, static_cast<Eigen::Index>(joint));
-        if (std::abs(velocity) >= friction_speed_threshold) {
+        if (friction_observation_mode == "saturated_sliding") {
+          constraint_clean =
+              constraint_clean &&
+              std::abs(constraint) <= frictionloss[joint] +
+                                          constraint_tolerance;
+          if (std::abs(velocity) >= friction_speed_threshold) {
+            const double motion_sign = velocity > 0.0 ? 1.0 : -1.0;
+            constraint_clean = constraint_clean &&
+                               constraint * motion_sign <= constraint_tolerance;
+          }
+        } else if (std::abs(velocity) >= friction_speed_threshold) {
           const double expected =
               velocity > 0.0 ? -frictionloss[joint] : frictionloss[joint];
           constraint_clean =
@@ -312,8 +342,7 @@ PreparedData selectValidSamples(const ExperimentData &source,
   result.data.qd.resize(indices.size(), source.n_dof);
   result.data.qdd.resize(indices.size(), source.n_dof);
   result.data.tau.resize(indices.size(), source.n_dof);
-  result.data.tau_constraint =
-      Eigen::MatrixXd::Zero(indices.size(), source.n_dof);
+  result.data.tau_constraint.resize(indices.size(), source.n_dof);
   result.data.saturated.assign(indices.size(), 0);
   result.data.contact_count.assign(indices.size(), 0);
   result.data.time.reserve(indices.size());
@@ -325,6 +354,8 @@ PreparedData selectValidSamples(const ExperimentData &source,
     result.data.qd.row(output_row) = source.qd.row(input_row);
     result.data.qdd.row(output_row) = source.qdd.row(input_row);
     result.data.tau.row(output_row) = source.tau.row(input_row);
+    result.data.tau_constraint.row(output_row) =
+        source.tau_constraint.row(input_row);
   }
   return result;
 }
@@ -342,23 +373,45 @@ Eigen::VectorXd flattenTorque(const ExperimentData &data) {
   return result;
 }
 
-/** Select sample-major torque rows whose corresponding joint is moving. */
-std::vector<Eigen::Index>
-movingObservationRows(const Eigen::MatrixXd &velocity,
-                      double minimum_speed) {
-  std::vector<Eigen::Index> rows;
-  rows.reserve(static_cast<std::size_t>(velocity.size()));
-  for (Eigen::Index sample = 0; sample < velocity.rows(); ++sample) {
-    for (Eigen::Index joint = 0; joint < velocity.cols(); ++joint) {
-      if (std::abs(velocity(sample, joint)) >= minimum_speed) {
-        rows.push_back(sample * velocity.cols() + joint);
+/** Select observation rows using the configured hard-friction semantics. */
+ObservationSelection selectObservationRows(
+    const ExperimentData &data, const std::vector<double> &frictionloss,
+    double minimum_speed, double constraint_tolerance,
+    const std::string &mode) {
+  ObservationSelection selection;
+  selection.rows.reserve(data.n_samples * data.n_dof);
+  selection.per_joint_counts.assign(data.n_dof, 0);
+  for (std::size_t sample = 0; sample < data.n_samples; ++sample) {
+    for (std::size_t joint = 0; joint < data.n_dof; ++joint) {
+      const auto row = static_cast<Eigen::Index>(sample);
+      const auto column = static_cast<Eigen::Index>(joint);
+      const double velocity = data.qd(row, column);
+      bool included = frictionloss.empty();
+      if (!frictionloss.empty() && std::abs(velocity) >= minimum_speed) {
+        if (mode == "moving") {
+          included = true;
+        } else if (mode == "saturated_sliding") {
+          const double constraint = data.tau_constraint(row, column);
+          const double motion_sign = velocity > 0.0 ? 1.0 : -1.0;
+          included =
+              std::abs(std::abs(constraint) - frictionloss[joint]) <=
+                  constraint_tolerance &&
+              constraint * motion_sign <= constraint_tolerance;
+        } else {
+          throw std::runtime_error("未知 friction_observation_mode: " + mode);
+        }
+      }
+      if (included) {
+        selection.rows.push_back(static_cast<Eigen::Index>(sample * data.n_dof +
+                                                           joint));
+        ++selection.per_joint_counts[joint];
       }
     }
   }
-  if (rows.empty()) {
-    throw std::runtime_error("摩擦速度阈值筛选后没有 observation row");
+  if (selection.rows.empty()) {
+    throw std::runtime_error("摩擦 observation policy 筛选后没有 observation row");
   }
-  return rows;
+  return selection;
 }
 
 /** Copy selected observation rows while preserving their original order. */
@@ -425,41 +478,32 @@ Eigen::MatrixXd baseObservation(const Eigen::MatrixXd &observation,
   return scaled * space.directions;
 }
 
-/** Compute torque error statistics for one joint in sample-major vectors. */
+/** Compute torque error statistics for one joint on selected rows only. */
 ErrorMetrics jointMetrics(const Eigen::VectorXd &measured,
                           const Eigen::VectorXd &predicted,
-                          const Eigen::MatrixXd &velocity,
-                          std::size_t n_dof, std::size_t joint,
-                          double minimum_speed) {
+                          const ObservationSelection &selection,
+                          std::size_t n_dof, std::size_t joint) {
   ErrorMetrics metrics;
-  const std::size_t total_samples =
-      static_cast<std::size_t>(measured.size()) / n_dof;
-  std::size_t samples = 0;
   double sum_squared = 0.0;
   double sum_absolute = 0.0;
   double sum_error = 0.0;
   double measured_mean = 0.0;
-  for (std::size_t sample = 0; sample < total_samples; ++sample) {
-    if (std::abs(velocity(static_cast<Eigen::Index>(sample),
-                          static_cast<Eigen::Index>(joint))) < minimum_speed) {
+  for (const Eigen::Index index : selection.rows) {
+    if (static_cast<std::size_t>(index) % n_dof != joint) {
       continue;
     }
-    measured_mean += measured(
-        static_cast<Eigen::Index>(sample * n_dof + joint));
-    ++samples;
+    measured_mean += measured(index);
+    ++metrics.included_count;
   }
-  if (samples == 0) {
-    throw std::runtime_error("逐关节误差统计没有满足速度阈值的样本");
+  if (metrics.included_count == 0) {
+    throw std::runtime_error("逐关节误差统计没有被 observation policy 选中的样本");
   }
-  measured_mean /= static_cast<double>(samples);
+  measured_mean /= static_cast<double>(metrics.included_count);
   double total_variance = 0.0;
-  for (std::size_t sample = 0; sample < total_samples; ++sample) {
-    if (std::abs(velocity(static_cast<Eigen::Index>(sample),
-                          static_cast<Eigen::Index>(joint))) < minimum_speed) {
+  for (const Eigen::Index index : selection.rows) {
+    if (static_cast<std::size_t>(index) % n_dof != joint) {
       continue;
     }
-    const Eigen::Index index =
-        static_cast<Eigen::Index>(sample * n_dof + joint);
     const double error = predicted(index) - measured(index);
     sum_squared += error * error;
     sum_absolute += std::abs(error);
@@ -468,13 +512,72 @@ ErrorMetrics jointMetrics(const Eigen::VectorXd &measured,
     const double centered = measured(index) - measured_mean;
     total_variance += centered * centered;
   }
-  metrics.rmse = std::sqrt(sum_squared / static_cast<double>(samples));
-  metrics.mae = sum_absolute / static_cast<double>(samples);
-  metrics.bias = sum_error / static_cast<double>(samples);
+  metrics.rmse =
+      std::sqrt(sum_squared / static_cast<double>(metrics.included_count));
+  metrics.mae = sum_absolute / static_cast<double>(metrics.included_count);
+  metrics.bias = sum_error / static_cast<double>(metrics.included_count);
   metrics.r_squared = total_variance > 0.0
                           ? 1.0 - sum_squared / total_variance
                           : (sum_squared == 0.0 ? 1.0 : 0.0);
   return metrics;
+}
+
+/** Compute aggregate selected-row error and retain the worst sample location. */
+AggregateError aggregateError(const Eigen::VectorXd &measured,
+                              const Eigen::VectorXd &predicted,
+                              const ExperimentData &data,
+                              const ObservationSelection &selection) {
+  AggregateError result;
+  double sum_squared = 0.0;
+  for (const Eigen::Index index : selection.rows) {
+    const double error = predicted(index) - measured(index);
+    const double absolute_error = std::abs(error);
+    sum_squared += error * error;
+    if (absolute_error > result.max_error) {
+      result.max_error = absolute_error;
+      result.worst_sample = static_cast<std::size_t>(index) / data.n_dof;
+      result.worst_joint = static_cast<std::size_t>(index) % data.n_dof;
+      result.worst_time = data.time[result.worst_sample];
+    }
+  }
+  result.included_count = selection.rows.size();
+  result.rmse = std::sqrt(sum_squared / static_cast<double>(result.included_count));
+  return result;
+}
+
+/** Compute aggregate error when vectors are already packed in selection order. */
+AggregateError aggregateSelectedError(const Eigen::VectorXd &measured,
+                                      const Eigen::VectorXd &predicted,
+                                      const ExperimentData &data,
+                                      const ObservationSelection &selection) {
+  if (measured.size() != static_cast<Eigen::Index>(selection.rows.size()) ||
+      predicted.size() != measured.size()) {
+    throw std::runtime_error("selected error vectors do not match row selection");
+  }
+  AggregateError result;
+  double sum_squared = 0.0;
+  for (std::size_t selected = 0; selected < selection.rows.size(); ++selected) {
+    const double error = predicted(static_cast<Eigen::Index>(selected)) -
+                         measured(static_cast<Eigen::Index>(selected));
+    const double absolute_error = std::abs(error);
+    sum_squared += error * error;
+    if (absolute_error > result.max_error) {
+      result.max_error = absolute_error;
+      const std::size_t original =
+          static_cast<std::size_t>(selection.rows[selected]);
+      result.worst_sample = original / data.n_dof;
+      result.worst_joint = original % data.n_dof;
+      result.worst_time = data.time[result.worst_sample];
+    }
+  }
+  result.included_count = selection.rows.size();
+  result.rmse = std::sqrt(sum_squared / static_cast<double>(result.included_count));
+  return result;
+}
+
+/** Return a selection containing every sample-joint observation row. */
+ObservationSelection allObservationRows(const ExperimentData &data) {
+  return selectObservationRows(data, {}, 0.0, 0.0, "moving");
 }
 
 /** Write an Eigen vector as an indented YAML sequence. */
@@ -486,12 +589,40 @@ void writeVector(std::ofstream &output, const std::string &name,
   }
 }
 
-/** Save validation torques for direct per-joint plotting and audit. */
+/** Write an Eigen matrix as a YAML row sequence for basis-direction audit. */
+void writeMatrix(std::ofstream &output, const std::string &name,
+                 const Eigen::MatrixXd &values) {
+  output << name << ":\n";
+  for (Eigen::Index row = 0; row < values.rows(); ++row) {
+    output << "  - [";
+    for (Eigen::Index column = 0; column < values.cols(); ++column) {
+      output << values(row, column);
+      if (column + 1 < values.cols()) {
+        output << ", ";
+      }
+    }
+    output << "]\n";
+  }
+}
+
+/** Write aggregate error fields beneath an already-emitted YAML mapping key. */
+void writeAggregateError(std::ofstream &output, const AggregateError &error,
+                         const std::string &indent = "  ") {
+  output << indent << "aggregate_rmse: " << error.rmse << "\n";
+  output << indent << "global_max_error: " << error.max_error << "\n";
+  output << indent << "included_observation_count: " << error.included_count
+         << "\n";
+  output << indent << "worst_sample: " << error.worst_sample << "\n";
+  output << indent << "worst_joint: " << (error.worst_joint + 1) << "\n";
+  output << indent << "worst_time: " << error.worst_time << "\n";
+}
+
+/** Save validation torques with inclusion matching the validation row policy. */
 fs::path savePredictions(const IdentificationConfig &config,
                          const ExperimentData &validation,
                          const Eigen::VectorXd &true_prediction,
                          const Eigen::VectorXd &identified_prediction,
-                         double minimum_speed) {
+                         const ObservationSelection &selection) {
   fs::path path = config.output_file;
   path.replace_extension(".prediction.csv");
   if (path.has_parent_path()) {
@@ -504,38 +635,47 @@ fs::path savePredictions(const IdentificationConfig &config,
   output << "time,joint,tau_simulation,tau_regressor_true,tau_identified,"
             "included\n"
          << std::setprecision(17);
+  std::vector<bool> included(validation.n_samples * validation.n_dof, false);
+  for (const Eigen::Index index : selection.rows) {
+    included[static_cast<std::size_t>(index)] = true;
+  }
   for (std::size_t sample = 0; sample < validation.n_samples; ++sample) {
     for (std::size_t joint = 0; joint < validation.n_dof; ++joint) {
       const Eigen::Index index =
           static_cast<Eigen::Index>(sample * validation.n_dof + joint);
-      const bool included =
-          std::abs(validation.qd(static_cast<Eigen::Index>(sample),
-                                 static_cast<Eigen::Index>(joint))) >=
-          minimum_speed;
       output << validation.time[sample] << "," << (joint + 1) << ","
              << validation.tau(static_cast<Eigen::Index>(sample),
                                static_cast<Eigen::Index>(joint))
              << "," << true_prediction(index) << ","
-             << identified_prediction(index) << "," << (included ? 1 : 0)
-             << "\n";
+             << identified_prediction(index) << ","
+             << (included[static_cast<std::size_t>(index)] ? 1 : 0) << "\n";
     }
   }
   return path;
 }
 
-/** Persist the complete clean/noisy A-to-B identification result. */
+/** Persist clean A-only identification and independent B validation audit data. */
 void saveResults(const IdentificationConfig &config,
                  const PreparedData &training,
                  const PreparedData &validation,
+                 const ObservationSelection &training_selection,
+                 const ObservationSelection &validation_selection,
                  const BaseParameterSpace &space,
+                 const BaseParameterSpace &validation_space,
                  const Eigen::VectorXd &theta_true,
                  const Eigen::VectorXd &beta_true,
                  const Eigen::VectorXd &beta_hat,
                  const Eigen::VectorXd &minimum_norm_parameters,
+                 const std::vector<ErrorMetrics> &training_model_metrics,
                  const std::vector<ErrorMetrics> &model_metrics,
                  const std::vector<ErrorMetrics> &estimate_metrics,
                  double beta_relative_error,
-                 const RobustDiagnostics &robust) {
+                 const RobustDiagnostics &robust,
+                 const AggregateError &oracle_a,
+                 const AggregateError &oracle_b,
+                 const AggregateError &training_residual,
+                 const AggregateError &validation_error,
+                 const AggregateError &full_validation_diagnostic) {
   if (config.output_file.has_parent_path()) {
     fs::create_directories(config.output_file.parent_path());
   }
@@ -545,7 +685,7 @@ void saveResults(const IdentificationConfig &config,
                              config.output_file.string());
   }
   output << std::setprecision(17);
-  output << "schema_version: 3\n";
+  output << "schema_version: 4\n";
   output << "robot: \"" << config.robot << "\"\n";
   output << "algorithm: \"" << (config.algorithm == 3 ? "IRLS" : "OLS")
          << "\"\n";
@@ -569,15 +709,64 @@ void saveResults(const IdentificationConfig &config,
   output << "validation_samples: " << validation.data.n_samples << "\n";
   output << "validation_excluded_samples: " << validation.excluded_samples
          << "\n";
+  output << "training_observation_policy: \""
+         << (config.joint_frictionloss.empty() ? "all"
+                                               : config.friction_observation_mode)
+         << "\"\n";
+  output << "validation_observation_policy: \""
+         << (config.joint_frictionloss.empty() ? "all"
+                                               : config.friction_observation_mode)
+         << "\"\n";
+  output << "training_observation_count: " << training_selection.rows.size()
+         << "\n";
+  output << "validation_observation_count: " << validation_selection.rows.size()
+         << "\n";
+  output << "training_observation_count_per_joint: [";
+  for (std::size_t joint = 0; joint < training_selection.per_joint_counts.size();
+       ++joint) {
+    if (joint > 0) output << ", ";
+    output << training_selection.per_joint_counts[joint];
+  }
+  output << "]\n";
+  output << "validation_observation_count_per_joint: [";
+  for (std::size_t joint = 0; joint < validation_selection.per_joint_counts.size();
+       ++joint) {
+    if (joint > 0) output << ", ";
+    output << validation_selection.per_joint_counts[joint];
+  }
+  output << "]\n";
   output << "full_parameter_count: " << space.scales.size() << "\n";
   output << "base_parameter_rank: " << space.rank << "\n";
   output << "rank_relative_tolerance: " << config.rank_relative_tolerance
          << "\n";
   output << "effective_condition_number: " << space.effective_condition
          << "\n";
+  output << "validation_rank_diagnostic: " << validation_space.rank << "\n";
+  output << "validation_condition_diagnostic: "
+         << validation_space.effective_condition << "\n";
+  output << "base_parameter_relative_error: " << beta_relative_error << "\n";
   output << "beta_relative_error: " << beta_relative_error << "\n";
   output << "friction_velocity_threshold: "
          << config.friction_velocity_threshold << "\n";
+  output << "friction_observation_mode: \"" << config.friction_observation_mode
+         << "\"\n";
+
+  output << "oracle_model_error:\n";
+  output << "  A:\n";
+  writeAggregateError(output, oracle_a, "    ");
+  output << "  B:\n";
+  writeAggregateError(output, oracle_b, "    ");
+  output << "parameter_estimation_error:\n";
+  output << "  base_parameter_relative_error: " << beta_relative_error << "\n";
+  output << "  training_residual:\n";
+  writeAggregateError(output, training_residual, "    ");
+  output << "independent_validation_error:\n";
+  writeAggregateError(output, validation_error);
+  output << "validation_model_valid_subset:\n";
+  writeAggregateError(output, validation_error);
+  output << "validation_full_forward_diagnostic:\n";
+  writeAggregateError(output, full_validation_diagnostic);
+
   if (!config.joint_frictionloss.empty()) {
     const Eigen::Index count =
         static_cast<Eigen::Index>(config.joint_frictionloss.size());
@@ -595,13 +784,25 @@ void saveResults(const IdentificationConfig &config,
          << "\n";
   output << "  minimum_weight: " << robust.minimum_weight << "\n";
   output << "  mean_weight: " << robust.mean_weight << "\n";
+  writeVector(output, "column_scales", space.scales);
   writeVector(output, "singular_values", space.singular_values);
+  writeMatrix(output, "base_directions", space.directions);
   writeVector(output, "beta_true", beta_true);
   writeVector(output, "beta_hat", beta_hat);
   writeVector(output, "full_minimum_norm_parameters", minimum_norm_parameters);
+  output << "oracle_A_per_joint:\n";
+  for (std::size_t joint = 0; joint < training_model_metrics.size(); ++joint) {
+    output << "  - joint: " << (joint + 1) << "\n";
+    output << "    included_observation_count: "
+           << training_model_metrics[joint].included_count << "\n";
+    output << "    rmse: " << training_model_metrics[joint].rmse << "\n";
+    output << "    max_error: " << training_model_metrics[joint].max_error << "\n";
+  }
   output << "validation_per_joint:\n";
   for (std::size_t joint = 0; joint < estimate_metrics.size(); ++joint) {
     output << "  - joint: " << (joint + 1) << "\n";
+    output << "    included_observation_count: "
+           << estimate_metrics[joint].included_count << "\n";
     output << "    tau_regressor_true_rmse: " << model_metrics[joint].rmse
            << "\n";
     output << "    tau_regressor_true_max_error: "
@@ -646,6 +847,25 @@ int main(int argc, char **argv) {
       throw std::runtime_error("可信闭环当前只允许 OLS(1) 或 IRLS(3)");
     }
     const bool friction_enabled = !config.joint_frictionloss.empty();
+    if (config.friction_observation_mode != "moving" &&
+        config.friction_observation_mode != "saturated_sliding") {
+      throw std::runtime_error(
+          "friction_observation_mode 仅支持 moving 或 saturated_sliding");
+    }
+    if (config.friction_observation_mode == "saturated_sliding" &&
+        (config.robot != "rebot_dm" || !friction_enabled)) {
+      throw std::runtime_error(
+          "saturated_sliding 仅用于带 friction truth 的 rebot_dm clean closure");
+    }
+    if (config.friction_observation_mode == "saturated_sliding" &&
+        config.algorithm != 1) {
+      throw std::runtime_error("reBot clean closure 只允许 OLS(1)");
+    }
+    if (config.friction_observation_mode == "saturated_sliding" &&
+        fs::weakly_canonical(config.basis_data_file) !=
+            fs::weakly_canonical(config.training_data_file)) {
+      throw std::runtime_error("reBot clean closure 要求 basis_data_file == training_data_file");
+    }
     const auto validate_truth_size = [dof](const std::vector<double> &values,
                                            const char *name) {
       if (!values.empty() && values.size() != dof) {
@@ -668,15 +888,18 @@ int main(int argc, char **argv) {
     PreparedData training =
         selectValidSamples(raw_training, config.constraint_tolerance,
                            config.joint_frictionloss,
-                           config.friction_velocity_threshold);
+                           config.friction_velocity_threshold,
+                           config.friction_observation_mode);
     PreparedData validation =
         selectValidSamples(raw_validation, config.constraint_tolerance,
                            config.joint_frictionloss,
-                           config.friction_velocity_threshold);
+                           config.friction_velocity_threshold,
+                           config.friction_observation_mode);
     PreparedData basis_data =
         selectValidSamples(raw_basis, config.constraint_tolerance,
                            config.joint_frictionloss,
-                           config.friction_velocity_threshold);
+                           config.friction_velocity_threshold,
+                           config.friction_observation_mode);
     std::cout << "Quality filter: A excluded " << training.excluded_samples
               << ", B excluded " << validation.excluded_samples << std::endl;
 
@@ -687,18 +910,36 @@ int main(int argc, char **argv) {
         friction_enabled
             ? mujoco_dynamics::MuJoCoParamFlags::ALL_WITH_FRICTION
             : mujoco_dynamics::MuJoCoParamFlags::ALL;
+    const Eigen::VectorXd theta_true =
+        identifier.getGroundTruthParameters(flags);
+    const ObservationSelection basis_selection = selectObservationRows(
+        basis_data.data, config.joint_frictionloss,
+        config.friction_velocity_threshold, config.constraint_tolerance,
+        config.friction_observation_mode);
+    const ObservationSelection training_selection = selectObservationRows(
+        training.data, config.joint_frictionloss,
+        config.friction_velocity_threshold, config.constraint_tolerance,
+        config.friction_observation_mode);
+    const ObservationSelection validation_selection = selectObservationRows(
+        validation.data, config.joint_frictionloss,
+        config.friction_velocity_threshold, config.constraint_tolerance,
+        config.friction_observation_mode);
+    std::cout << "Observation rows A=" << training_selection.rows.size()
+              << " B=" << validation_selection.rows.size() << std::endl;
+    for (std::size_t joint = 0; joint < dof; ++joint) {
+      std::cout << "  J" << (joint + 1)
+                << " A=" << training_selection.per_joint_counts[joint]
+                << " B=" << validation_selection.per_joint_counts[joint]
+                << std::endl;
+    }
+
     BaseParameterSpace space;
     {
       Eigen::MatrixXd basis_observation =
           identifier.computeObservationMatrix(
               basis_data.data.q.transpose(), basis_data.data.qd.transpose(),
               basis_data.data.qdd.transpose(), flags);
-      if (friction_enabled) {
-        basis_observation = takeRows(
-            basis_observation,
-            movingObservationRows(basis_data.data.qd,
-                                  config.friction_velocity_threshold));
-      }
+      basis_observation = takeRows(basis_observation, basis_selection.rows);
       space = computeBaseSpace(basis_observation,
                                config.rank_relative_tolerance);
     }
@@ -706,17 +947,17 @@ int main(int argc, char **argv) {
         identifier.computeObservationMatrix(
             training.data.q.transpose(), training.data.qd.transpose(),
             training.data.qdd.transpose(), flags);
-    Eigen::VectorXd training_torque = flattenTorque(training.data);
-    if (friction_enabled) {
-      const auto moving_rows = movingObservationRows(
-          training.data.qd, config.friction_velocity_threshold);
-      training_observation = takeRows(training_observation, moving_rows);
-      training_torque = takeRows(training_torque, moving_rows);
-    }
+    const Eigen::VectorXd training_torque_full = flattenTorque(training.data);
+    const Eigen::VectorXd training_true_prediction =
+        training_observation * theta_true;
+    const AggregateError oracle_a = aggregateError(
+        training_torque_full, training_true_prediction, training.data,
+        training_selection);
+    training_observation = takeRows(training_observation, training_selection.rows);
+    const Eigen::VectorXd training_torque =
+        takeRows(training_torque_full, training_selection.rows);
     const Eigen::MatrixXd training_base =
         baseObservation(training_observation, space);
-    const Eigen::VectorXd theta_true =
-        identifier.getGroundTruthParameters(flags);
     const Eigen::VectorXd beta_true =
         space.directions.transpose() * space.scales.asDiagonal() * theta_true;
 
@@ -749,46 +990,90 @@ int main(int argc, char **argv) {
         (beta_hat - beta_true).norm() /
         std::max(beta_true.norm(), std::numeric_limits<double>::epsilon());
 
+    const Eigen::VectorXd training_identified_prediction =
+        training_base * beta_hat;
+    const AggregateError training_residual = aggregateSelectedError(
+        training_torque, training_identified_prediction, training.data,
+        training_selection);
+    std::vector<ErrorMetrics> training_model_metrics;
+    for (std::size_t joint = 0; joint < dof; ++joint) {
+      training_model_metrics.push_back(jointMetrics(
+          training_torque_full, training_true_prediction, training_selection,
+          dof, joint));
+    }
+
     const Eigen::MatrixXd validation_observation =
         identifier.computeObservationMatrix(
             validation.data.q.transpose(), validation.data.qd.transpose(),
             validation.data.qdd.transpose(), flags);
+    const Eigen::MatrixXd validation_selected_observation =
+        takeRows(validation_observation, validation_selection.rows);
+    const BaseParameterSpace validation_space = computeBaseSpace(
+        validation_selected_observation, config.rank_relative_tolerance);
     const Eigen::MatrixXd validation_base =
         baseObservation(validation_observation, space);
     const Eigen::VectorXd validation_torque = flattenTorque(validation.data);
     const Eigen::VectorXd true_prediction =
         validation_observation * theta_true;
     const Eigen::VectorXd identified_prediction = validation_base * beta_hat;
+    const AggregateError oracle_b = aggregateError(
+        validation_torque, true_prediction, validation.data,
+        validation_selection);
+    const AggregateError validation_error = aggregateError(
+        validation_torque, identified_prediction, validation.data,
+        validation_selection);
+    const AggregateError full_validation_diagnostic = aggregateError(
+        validation_torque, true_prediction, validation.data,
+        allObservationRows(validation.data));
     std::vector<ErrorMetrics> model_metrics;
     std::vector<ErrorMetrics> estimate_metrics;
     for (std::size_t joint = 0; joint < dof; ++joint) {
       model_metrics.push_back(jointMetrics(
-          validation_torque, true_prediction, validation.data.qd, dof, joint,
-          friction_enabled ? config.friction_velocity_threshold : 0.0));
+          validation_torque, true_prediction, validation_selection, dof,
+          joint));
       estimate_metrics.push_back(jointMetrics(
-          validation_torque, identified_prediction, validation.data.qd, dof,
-          joint,
-          friction_enabled ? config.friction_velocity_threshold : 0.0));
+          validation_torque, identified_prediction, validation_selection, dof,
+          joint));
     }
 
     std::cout << std::setprecision(10)
-              << "W rank: " << space.rank << "/" << space.scales.size()
+              << "A oracle RMSE=" << oracle_a.rmse
+              << " max=" << oracle_a.max_error
+              << " worst_sample=" << oracle_a.worst_sample
+              << " worst_joint=J" << (oracle_a.worst_joint + 1)
+              << " worst_time=" << oracle_a.worst_time << std::endl;
+    std::cout << "B oracle RMSE=" << oracle_b.rmse
+              << " max=" << oracle_b.max_error
+              << " worst_sample=" << oracle_b.worst_sample
+              << " worst_joint=J" << (oracle_b.worst_joint + 1)
+              << " worst_time=" << oracle_b.worst_time << std::endl;
+    std::cout << "A W rank: " << space.rank << "/" << space.scales.size()
               << ", effective condition: " << space.effective_condition
               << ", beta relative error: " << beta_relative_error << std::endl;
+    std::cout << "B rank diagnostic: " << validation_space.rank << "/"
+              << validation_space.scales.size()
+              << ", effective condition: "
+              << validation_space.effective_condition << std::endl;
+    std::cout << "B aggregate RMSE: " << validation_error.rmse
+              << " Nm, global max: " << validation_error.max_error << " Nm"
+              << std::endl;
     for (std::size_t joint = 0; joint < dof; ++joint) {
       std::cout << "Joint " << (joint + 1)
-                << " B RMSE: " << estimate_metrics[joint].rmse
+                << " B count: " << estimate_metrics[joint].included_count
+                << ", RMSE: " << estimate_metrics[joint].rmse
                 << " Nm, max: " << estimate_metrics[joint].max_error
                 << " Nm, R2: " << estimate_metrics[joint].r_squared
                 << std::endl;
     }
     savePredictions(config, validation.data, true_prediction,
-                    identified_prediction,
-                    friction_enabled ? config.friction_velocity_threshold
-                                     : 0.0);
-    saveResults(config, training, validation, space, theta_true, beta_true, beta_hat,
-                minimum_norm_parameters, model_metrics, estimate_metrics,
-                beta_relative_error, robust);
+                    identified_prediction, validation_selection);
+    saveResults(config, training, validation, training_selection,
+                validation_selection, space, validation_space, theta_true,
+                beta_true, beta_hat, minimum_norm_parameters,
+                training_model_metrics, model_metrics, estimate_metrics,
+                beta_relative_error, robust, oracle_a, oracle_b,
+                training_residual, validation_error,
+                full_validation_diagnostic);
     std::cout << "结果已保存到: " << config.output_file << std::endl;
     return 0;
   } catch (const std::exception &error) {
