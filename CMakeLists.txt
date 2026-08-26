@@ -154,6 +154,24 @@ target_compile_definitions(run_experiment
   PRIVATE PROJECT_GIT_COMMIT="${PROJECT_GIT_COMMIT}"
 )
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_executable(rebot_trajectory_renderer
+    src/app/rebot_trajectory_renderer.cpp
+  )
+  target_include_directories(rebot_trajectory_renderer
+    PRIVATE
+      ${MUJOCO_INCLUDE_DIR}
+  )
+  target_link_libraries(rebot_trajectory_renderer
+    PRIVATE
+      ${MUJOCO_LIB}
+      glfw
+  )
+  target_compile_definitions(rebot_trajectory_renderer
+    PRIVATE PROJECT_ROOT_DIR="${PROJECT_ROOT_DIR}"
+  )
+endif()
+
 add_executable(identify
   src/identification/src/main.cpp
 )

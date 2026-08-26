@@ -1076,6 +1076,7 @@ raw minimum-norm parameter vector 供审计，但它不是逐项物理恢复的�
 - `rebot_constraint_force_diagnostic`：分解 forward solver 的约束力来源
 - `rebot_excitation_data_quality`：检查实际 A/B 轨迹的 60/72/78 列 rank 和 condition
 - `rebot_identification_model_closure`：解释给定 seed 的 MuJoCo↔回归器 oracle floor
+- `rebot_trajectory_renderer`（Linux）：从 reBot simulation-truth CSV 离线生成 MP4
 
 ### 12.2 关键源码位置
 
@@ -1086,6 +1087,7 @@ raw minimum-norm parameter vector 供审计，但它不是逐项物理恢复的�
 - `src/app/simulation_backend.cpp`：MuJoCo backend 适配
 - `src/app/piper_hardware_backend.cpp`：Piper 真机 backend 与 Python bridge 通信
 - `src/app/experiment_recorder.cpp`：统一 CSV 记录
+- `src/app/rebot_trajectory_renderer.cpp`：reBot CSV 关节位置回放、离屏渲染与 FFmpeg 编码
 - `src/identification/src/main.cpp`：离线辨识 CLI 主入口
 - `src/identification/src/identification.cpp`：预处理与求解流程
 - `src/identification/src/algorithms.cpp`：各类辨识算法
@@ -1333,6 +1335,39 @@ python3 scripts/verify_phase3_gates.py
 simulation closure。`saturated_sliding` 依赖仿真 oracle truth；78 维 raw minimum-
 norm parameters 仅供审计。当前结果不能解释为真实 reBot 硬件参数，也不包含
 噪声、outlier、IRLS robustness、reBot 真机 backend 或 ROS 链路。
+
+### 13.11 将已有轨迹保存为 MP4
+
+`run_experiment` 的 GUI viewer 与仿真主循环独立运行，因此 30 秒仿真可能很快
+完成。不要通过修改 `simulation_rate_hz` 来降低观看速度，因为该参数决定 MuJoCo
+积分步长，会改变控制和辨识数据。Linux 下可直接回放已有 CSV：
+
+```bash
+./build/rebot_trajectory_renderer \
+  --input data/rebot_dm/excitation_A.csv \
+  --output results/rebot_dm_excitation_A.mp4
+```
+
+渲染器严格读取 `time_begin/q0..q5`，并用最后一行的
+`time_end/q_next0..q_next5` 补齐轨迹终点。视频帧之间只对关节位置进行线性插值，
+然后设置 MuJoCo `qpos` 并调用 `mj_forward()` 更新可视几何；它不会重新积分动力学，
+也不会修改或重新解释 `qd/qdd_mujoco/tau_effort`。
+
+默认参数为 `1280x720`、`60 fps` 和 `1.0` 倍速。以下命令把仿真时间
+`10..15 s` 的片段以 `0.5` 倍速保存为约 10 秒视频：
+
+```bash
+./build/rebot_trajectory_renderer \
+  --input data/rebot_dm/excitation_A.csv \
+  --output results/rebot_dm_excitation_A_slow_clip.mp4 \
+  --start-time 10 \
+  --duration 5 \
+  --playback-speed 0.5
+```
+
+还可使用 `--fps`、`--width`、`--height` 和 `--scene`。H.264 `yuv420p`
+要求宽高为正偶数。已有输出默认拒绝覆盖；确认替换时添加 `--overwrite`。
+运行时必须存在可用的 GLFW 显示环境，并且 `ffmpeg` 可从 PATH 调用。
 
 ---
 

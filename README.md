@@ -18,6 +18,7 @@
 - CMake 3.21+
 - C++17 编译器
 - Pinocchio 4.x（reBot-DM dynamics / regressor；当前 Ubuntu 22.04 主机使用 `ros-humble-pinocchio`）
+- FFmpeg（可选；Linux 下将 reBot-DM 仿真 CSV 离线渲染为 MP4 时需要）
 
 如果 MuJoCo 未安装在系统默认路径，请设置环境变量 `MUJOCO_DIR`。使用 ROS Humble 提供的 Pinocchio 时，配置前先加载对应 shell 的环境：zsh 执行 `source /opt/ros/humble/setup.zsh`，Bash 执行 `source /opt/ros/humble/setup.bash`，让 CMake 能找到 Pinocchio 及其依赖。
 
@@ -101,6 +102,31 @@ python3 scripts/verify_rebot_clean_identification.py \
 ```
 
 从模型门禁、A/B 重新采集到 OLS 和独立验证的完整可复制命令、产物说明与通过标准，统一记录在 [`doc/robot_parameter_identification_manual.md`](doc/robot_parameter_identification_manual.md#13-rebot-dm-仿真辨识完整运行流程)。该闭环仅代表 clean synthetic simulation，不代表真实 reBot 硬件参数。
+
+#### 将 reBot-DM 轨迹保存为视频（Linux）
+
+GUI viewer 不会限制仿真主循环速度。需要稳定观察运动时，可以直接读取已有
+simulation-truth CSV，以固定相机离线生成 MP4，而不重新执行仿真：
+
+```bash
+./build/rebot_trajectory_renderer \
+  --input data/rebot_dm/excitation_A.csv \
+  --output results/rebot_dm_excitation_A.mp4
+```
+
+默认输出 `1280x720`、`60 fps`、`1.0` 倍速的 H.264 MP4。慢放或只导出一段：
+
+```bash
+./build/rebot_trajectory_renderer \
+  --input data/rebot_dm/excitation_A.csv \
+  --output results/rebot_dm_excitation_A_slow_clip.mp4 \
+  --playback-speed 0.5 \
+  --start-time 10 \
+  --duration 5
+```
+
+已有输出默认不会被覆盖；确认替换时显式添加 `--overwrite`。该工具需要可用的
+GLFW 显示环境以及 PATH 中的 `ffmpeg`，目前只构建 Linux target。
 
 ### 6. 运行 Piper 真机实验
 
@@ -232,3 +258,4 @@ run_experiment
 - `rebot_constraint_force_diagnostic`：分解 reBot forward rollout 的 friction、equality、limit、contact 等约束力来源
 - `rebot_excitation_data_quality`：检查 reBot A/B 实际轨迹的 60/72/78 列 rank、condition 和结构零列
 - `rebot_identification_model_closure`：解释指定 trajectory seed 的 MuJoCo forward/inverse 与 Pinocchio regressor oracle floor
+- `rebot_trajectory_renderer`（Linux）：将 reBot simulation-truth CSV 离线回放并保存为 H.264 MP4
