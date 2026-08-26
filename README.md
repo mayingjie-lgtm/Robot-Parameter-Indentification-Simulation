@@ -19,7 +19,7 @@
 - C++17 编译器
 - Pinocchio 4.x（reBot-DM dynamics / regressor；当前 Ubuntu 22.04 主机使用 `ros-humble-pinocchio`）
 
-如果 MuJoCo 未安装在系统默认路径，请设置环境变量 `MUJOCO_DIR`。使用 ROS Humble 提供的 Pinocchio 时，配置前先执行 `source /opt/ros/humble/setup.bash`，让 CMake 能找到 Pinocchio 及其依赖。
+如果 MuJoCo 未安装在系统默认路径，请设置环境变量 `MUJOCO_DIR`。使用 ROS Humble 提供的 Pinocchio 时，配置前先加载对应 shell 的环境：zsh 执行 `source /opt/ros/humble/setup.zsh`，Bash 执行 `source /opt/ros/humble/setup.bash`，让 CMake 能找到 Pinocchio 及其依赖。
 
 ### 2. 配置项目
 
@@ -47,7 +47,7 @@ cmake --build build --parallel
 - 按机器人选择对应 MuJoCo scene
 - 在 `data/benchmark_data.csv` 输出采样数据
 
-通过修改 [`config/experiment.yaml`](config/experiment.yaml) 中的 `robot` 和 `backend` 字段，可以在仿真后端和 Piper 真机后端之间切换。切到 `piper` 且 `backend: sim` 时，会自动改用 [`config/piper_force_controller_node.yaml`](config/piper_force_controller_node.yaml) 和 `piper` 对应的 MuJoCo 模型。Phase 4B 还增加了 `robot: rebot_dm` 的最小仿真分支与 [`config/rebot_dm_smoke_experiment.yaml`](config/rebot_dm_smoke_experiment.yaml) 静态保持 smoke；当前 runtime/data semantics 已验证，但 `rebot_dm/assets/` 下十个 accepted binary STL 尚未完成 repository-local vendoring，因此暂不能标记 Phase 4B PASS，详见 [`doc/PHASE4B_REBOT_RUNTIME_BASELINE.md`](doc/PHASE4B_REBOT_RUNTIME_BASELINE.md)。
+通过修改 [`config/experiment.yaml`](config/experiment.yaml) 中的 `robot` 和 `backend` 字段，可以在仿真后端和 Piper 真机后端之间切换。切到 `piper` 且 `backend: sim` 时，会自动改用 [`config/piper_force_controller_node.yaml`](config/piper_force_controller_node.yaml) 和 `piper` 对应的 MuJoCo 模型。`robot: rebot_dm` 当前严格限制为仿真后端；所需 10 个 accepted binary STL 已完成 repository-local vendoring，Phase 4B runtime、Phase 5A regressor、Phase 5B A/B excitation 和 Phase 5C clean identification 均已 PASS。完整复现流程见 [`doc/robot_parameter_identification_manual.md`](doc/robot_parameter_identification_manual.md#13-rebot-dm-仿真辨识完整运行流程)，各阶段数值证据见 [`doc/PHASE4B_REBOT_RUNTIME_BASELINE.md`](doc/PHASE4B_REBOT_RUNTIME_BASELINE.md)、[`doc/PHASE5A_REBOT_REGRESSOR_BASELINE.md`](doc/PHASE5A_REBOT_REGRESSOR_BASELINE.md)、[`doc/PHASE5B_REBOT_EXCITATION_BASELINE.md`](doc/PHASE5B_REBOT_EXCITATION_BASELINE.md) 和 [`doc/PHASE5C_REBOT_CLEAN_IDENTIFICATION_BASELINE.md`](doc/PHASE5C_REBOT_CLEAN_IDENTIFICATION_BASELINE.md)。
 
 推荐的后端切换方式：
 
@@ -84,6 +84,23 @@ cmake --build build --parallel
 ./build/identify --config config/identification_friction.yaml
 python3 scripts/verify_phase3_gates.py
 ```
+
+#### reBot-DM 仿真辨识
+
+reBot-DM 当前可信流程使用固定 seed 生成独立轨迹 A/B，只用 A 建立 52 维基础参数空间并执行无 ridge OLS，再用 B 做独立力矩预测。快速复核已有基准产物：
+
+```bash
+python3 scripts/verify_rebot_excitation_data.py \
+  --csv data/rebot_dm/excitation_A.csv
+python3 scripts/verify_rebot_excitation_data.py \
+  --csv data/rebot_dm/excitation_B.csv
+./build/rebot_excitation_data_quality data/rebot_dm/excitation_A.csv
+./build/rebot_excitation_data_quality data/rebot_dm/excitation_B.csv
+python3 scripts/verify_rebot_clean_identification.py \
+  --result results/rebot_dm_clean_identification.yaml
+```
+
+从模型门禁、A/B 重新采集到 OLS 和独立验证的完整可复制命令、产物说明与通过标准，统一记录在 [`doc/robot_parameter_identification_manual.md`](doc/robot_parameter_identification_manual.md#13-rebot-dm-仿真辨识完整运行流程)。该闭环仅代表 clean synthetic simulation，不代表真实 reBot 硬件参数。
 
 ### 6. 运行 Piper 真机实验
 
@@ -143,7 +160,7 @@ python3 scripts/verify_phase3_gates.py
 ```text
 ├── franka_emika_panda/   # MuJoCo Panda 模型与资源
 ├── piper/                # MuJoCo Piper 模型与资源
-├── rebot_dm/             # reBot-DM canonical dynamics + Phase 4B runtime scene/asset manifest
+├── rebot_dm/             # reBot-DM canonical dynamics、runtime scene 与 repository-local mesh
 ├── src/app/              # 统一实验入口、backend 与 recorder
 ├── src/sim_com_node/     # MuJoCo 仿真器
 ├── src/force_node/       # C++ 控制器、轨迹与碰撞检查
@@ -211,3 +228,7 @@ run_experiment
 - `regressor_test`：检查 Piper 回归矩阵与 MuJoCo 动力学一致性
 - `rebot_mujoco_model_sanity`：检查 reBot-DM canonical MJCF 的 J1–J6 mapping、六个 torque actuator、显式 simulation truth 与固定夹爪状态；可选读取外部源 MJCF 验证指定夹爪开度的 mesh 自碰撞
 - `rebot_model_consistency_test`：执行 reBot-DM MuJoCo↔Pinocchio joint mapping、gravity、`M(q)`、inverse dynamics 与 `Y*theta` 六项 Phase 4A 门禁；当前基线见 [`doc/PHASE4_REBOT_DM_MODEL_BASELINE.md`](doc/PHASE4_REBOT_DM_MODEL_BASELINE.md)
+- `rebot_phase5a_regressor_test`：检查 reBot-DM 60/72/78 列参数布局，以及 rigid/armature/damping/frictionloss simulation-truth 闭环
+- `rebot_constraint_force_diagnostic`：分解 reBot forward rollout 的 friction、equality、limit、contact 等约束力来源
+- `rebot_excitation_data_quality`：检查 reBot A/B 实际轨迹的 60/72/78 列 rank、condition 和结构零列
+- `rebot_identification_model_closure`：解释指定 trajectory seed 的 MuJoCo forward/inverse 与 Pinocchio regressor oracle floor

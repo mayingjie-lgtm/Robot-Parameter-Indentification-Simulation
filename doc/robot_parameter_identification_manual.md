@@ -4,7 +4,7 @@
 >
 > 当前工程架构、数据字段真实来源和阶段状态以根目录 `AGENTS.md`、`doc/ARCHITECTURE.md` 和 `doc/PHASE1_BASELINE.md` 为准。本文若与当前代码或这些文档冲突，应视为历史描述并进行增量修正，不能作为当前实现的最高优先级 source of truth。
 >
-> 2026-08-24：完整 Piper 仿真闭环的实际结果和复现入口见 `doc/PHASE3_PIPER_BASELINE.md`。
+> 2026-08-26：完整 Piper 仿真闭环见 `doc/PHASE3_PIPER_BASELINE.md`；reBot-DM 的模型、运行时、回归器、激励数据与 clean identification 已依次完成 Phase 4A、4B、5A、5B、5C，完整操作入口见本文第 13 节。
 
 本文重点整合了以下主题：
 
@@ -32,17 +32,19 @@
 
 ### 1.2 当前支持对象
 
-当前仓库支持两类机器人模型：
+当前仓库支持三类机器人模型：
 
 - `panda`：7 自由度 Franka Panda
 - `piper`：6 自由度 Piper 机械臂
+- `rebot_dm`：固定夹爪、只控制 J1-J6 的 6 自由度 reBot-DM；当前只支持 MuJoCo 仿真与离线辨识，不支持真机 backend
 
-两者共用同一套实验链路，但在以下方面不同：
+三者共用统一实验和离线辨识入口，但在以下方面不同：
 
 - 自由度数量不同；
 - MuJoCo XML 模型不同；
 - 刚体参数数量不同；
-- 回归矩阵构造器不同。
+- 回归矩阵构造器不同：Panda/Piper 使用现有 MuJoCo-specific regressor，reBot-DM 使用 Pinocchio 原生刚体 regressor 并附加 actuator 参数列；
+- backend 能力不同：Piper 另有真机 bridge，reBot-DM 当前严格限制为 `backend: sim`。
 
 ### 1.3 系统总流程
 
@@ -71,17 +73,37 @@ run_experiment
        ExperimentRecorder
              |
              v
-        data/phase3/trajectory_A.csv + trajectory_B.csv
+        trajectory_A.csv + trajectory_B.csv
              |
              v
           identify
              |
-             +--> 预处理
-             +--> 构造观测矩阵 W
-             +--> 求解参数
+             +--> 显式选择 q / qd / qdd_mujoco / tau_effort
+             +--> 构造观测矩阵 W_A
+             +--> 由 A 的 scaled SVD 建立基础参数空间
+             +--> 只用 A 求解参数
              +--> 独立轨迹 B 验证
              v
-      results/identification.yaml
+      result.yaml + prediction.csv
+```
+
+对 reBot-DM，运行链路进一步固定为：
+
+```text
+seed 20260826 -> trajectory A -> training / basis
+seed 20260829 -> trajectory B -> independent validation
+                         |
+                         v
+ReBotPinocchioRegressor: 60 rigid + 6 armature + 6 damping + 6 frictionloss
+                         |
+                         v
+             78 raw columns -> A-only rank 52
+                         |
+                         v
+               unregularized OLS -> beta_hat
+                         |
+                         v
+               B-only torque prediction
 ```
 
 从职责划分上看，系统可以拆成六层：
@@ -135,9 +157,10 @@ $$
 
 ### 2.2 坐标系与参数定义
 
-本项目的动力学参数不是基于传统 DH 质心坐标定义，而是基于
-**MuJoCo body-local 坐标系** 定义。对每个刚体 `body`，使用如下
-标准惯性参数向量：
+Panda/Piper 的现有 MuJoCo-specific regressor 使用 MuJoCo body-local 参数；
+reBot-DM 则保持 Pinocchio `computeJointTorqueRegressor()` 与
+`Inertia::toDynamicParameters()` 的原生 10 参数顺序，不做二次重排。对每个参与
+回归的刚体，均使用如下标准惯性参数向量：
 
 $$
 \theta_{body} =
@@ -237,7 +260,8 @@ $$
 - $qfrc_{passive}=-D\dot q$，因此维持目标运动所需的 actuator compensation 是 $+D\dot q$；
 - `armature` 直接加到惯性矩阵对角线上；
 - 线性 damping 被显式写入辨识模型；
-- 非线性摩擦模型仅在 `NLS_FRICTION` 中额外引入。
+- 当前可信 Piper/reBot-DM 闭环可额外加入线性 hard-Coulomb `frictionloss` 列；
+- tanh/Stribeck 非线性摩擦只由研究用途的 `NLS_FRICTION` 路径引入。
 
 对当前仓库而言，这个式子是“用于辨识的工程模型”，它尽量贴近 MuJoCo，
 但仍然是一个经过抽象与裁剪后的版本。
@@ -266,11 +290,12 @@ $$
 
 ### 4.1 线性参数向量
 
-对每个刚体使用 10 维标准惯性参数，则总参数由三部分组成：
+对每个刚体使用 10 维标准惯性参数，则当前线性参数最多由四部分组成：
 
 1. 刚体惯性参数
 2. `armature` 参数
 3. `damping` 参数
+4. 启用 dry friction 时的 `frictionloss` 参数
 
 若有 $N_b$ 个参与辨识的刚体，则线性参数向量为：
 
@@ -290,6 +315,10 @@ $$
 
 - `piper`：$N_b = 6$，所以线性参数总数为 $6 \times 10 + 6 + 6 = 72$
 - `panda`：$N_b = 8$，所以线性参数总数为 $8 \times 10 + 7 + 7 = 94$
+- `rebot_dm`：Pinocchio rigid-body 部分为 60 列；加入 armature+damping 后为 72 列；再加入 6 个 `frictionloss` 列后为 78 列
+
+reBot-DM 当前 clean baseline 在相对阈值 `1e-6 * sigma_max` 下只有 52 个
+基础方向。这里的 `78` 是 raw parameter count，不表示 78 个参数都能独立恢复。
 
 ### 4.2 线性回归模型
 
@@ -429,10 +458,11 @@ $$
 
 ### 4.4 `armature` 与 `damping` 的回归列
 
-对每个关节 $i$：
+对当前可信 Piper/reBot-DM 逆动力学补偿语义，每个关节 $i$：
 
 - armature 项对应 $\ddot{q}_i$
-- damping 项对应 $-\dot{q}_i$
+- MuJoCo 施加的被动 damping 为 $-d_i\dot{q}_i$，所以 actuator torque 回归列对应 $+\dot{q}_i$
+- 离开零速区后，`frictionloss` 的 actuator compensation 对应 $\mathrm{sign}(\dot{q}_i)$
 
 因此附加列可直接写为：
 
@@ -441,7 +471,11 @@ Y_{armature}(i,i) = \ddot{q}_i
 $$
 
 $$
-Y_{damping}(i,i) = -\dot{q}_i
+Y_{damping}(i,i) = +\dot{q}_i
+$$
+
+$$
+Y_{frictionloss}(i,i) = \mathrm{sign}(\dot{q}_i)
 $$
 
 ### 4.5 可辨识性与秩亏
@@ -610,15 +644,19 @@ $q(t)$，流程为：
 
 ### 7.1 采样内容
 
-统一实验入口当前记录以下信号：
+统一仿真入口当前同时记录积分区间起点、终点和明确来源的力矩通道：
 
-- 时间 `time`
-- 关节位置 `q`
-- 关节速度 `qd`
-- 关节加速度列 `qdd`
-- 控制输入列 `tau`
+- `time_begin/time_end`
+- `q/qd`：MuJoCo pre-integration `qpos/qvel`
+- `qdd_mujoco`：同一步的 MuJoCo `qacc`，正式仿真辨识使用此列
+- `qdd_diff`：前向速度差分，只用于诊断
+- `tau_cmd`：控制命令
+- `tau_effort`：MuJoCo `qfrc_actuator`，正式仿真辨识使用此列
+- `tau_constraint`：MuJoCo `qfrc_constraint`
+- `q_next/qd_next`、`saturated`、`contact_count`
 
-但必须区分“环境可提供”与“当前 recorder 实际记录”：MuJoCo 可以直接提供 `qacc`，而当前统一 `ExperimentRecorder` 仍通过速度一阶差分生成 `qdd`。因此仿真理论上可以使用更高质量的 physics-engine acceleration，但当前主链路尚未利用这一优势。
+真实 Piper backend 仍保留 `legacy_ambiguous_schema`，不能把其 `qdd/tau`
+按上述 MuJoCo truth 解释。
 
 ### 7.2 若加速度缺失时的补全
 
@@ -661,7 +699,7 @@ $$
 
 其中 $\lambda > 0$ 是 Tikhonov 正则化系数。
 
-### 8.2 为什么必须正则化
+### 8.2 秩亏与当前基础参数空间
 
 当 $W$ 接近秩亏时，正规方程
 
@@ -670,27 +708,27 @@ $$
 $$
 
 会出现严重病态。此时即使残差很小，参数也可能在零空间方向上大幅漂移。
-引入正则项后，求解变为：
+当前可信闭环不通过 ridge 把零空间方向强行变成“可辨识参数”，而是先对 A 的
+观测矩阵做列范数缩放，再用 SVD 和固定相对阈值选择基础方向。求解只在这个
+基础参数空间中进行，B 不参与缩放、秩判断或方向选择。
 
-$$
-(W^T W + \lambda I)\beta = W^T \tau
-$$
-
-它不会从根本上消除不可辨识性，但能抑制数值爆炸。
+正则化仍可作为其他研究算法的数值工具，但它不会从根本上消除不可辨识性，
+也不是当前 Piper/reBot clean OLS baseline 的组成部分。
 
 ### 8.3 当前实现中的主要算法
 
 #### OLS
 
-普通最小二乘在当前实现中使用了 ridge 正则化：
+当前 OLS 使用 SVD pseudoinverse 解无正则最小二乘：
 
 $$
 \hat{\beta}_{OLS}
-=
-(W^T W + \lambda I)^{-1}W^T\tau
+= \arg\min_\beta \|W\beta-\tau\|_2^2
 $$
 
-优点是简单、快速；缺点是对离群点敏感。
+正式 `identify` CLI 当前只接受 OLS (`algorithm: 1`) 或 Huber IRLS
+(`algorithm: 3`)；reBot-DM 的 `saturated_sliding` clean closure 进一步强制使用
+OLS。其优点是简单、可审计；缺点是对离群点敏感。
 
 #### WLS
 
@@ -729,7 +767,7 @@ $$
 \hat{\beta}^{(k+1)}
 =
 \arg\min_\beta
-\|W_k^{1/2}(W\beta-\tau)\|_2^2 + \lambda\|\beta\|_2^2
+\|W_k^{1/2}(W\beta-\tau)\|_2^2
 $$
 
 当数据中只存在少量异常样本时，IRLS 往往明显优于 OLS/WLS。
@@ -770,13 +808,18 @@ $$
 
 ## 9. 非线性摩擦辨识
 
-当前可信基线先验证 MuJoCo plant 中明确配置的 `frictionloss`：
+当前可信 Piper/reBot-DM 基线先验证 MuJoCo plant 中明确配置的
+`frictionloss`：
 
 $$
 \tau_c = F_c\,\mathrm{sign}(\dot q), \qquad |\dot q|\ge 0.05\,\mathrm{rad/s}
 $$
 
-它为 Piper 回归器增加六个线性列，使参数从 72 增至 78。只有这个带已知 plant 真值的 OLS 闭环通过后，才有资格讨论下面的 tanh 非线性模型；当前 `NLS_FRICTION` 不属于 Phase 3 通过条件。
+它为 Piper/reBot-DM 回归器增加六个线性列，使参数从 72 增至 78。reBot-DM
+forward rollout 在任意 `|qd| >= 0.05` 样本上不保证摩擦力已经饱和，因此 clean
+baseline 只在已证明为 `saturated_sliding` 的 observation rows 上使用 hard-Coulomb
+列。该策略依赖已知仿真 truth，不能直接迁移到真机。当前 `NLS_FRICTION` 不属于
+Piper Phase 3 或 reBot Phase 5C 的通过条件。
 
 ### 9.1 为什么需要非线性摩擦模型
 
@@ -1011,9 +1054,9 @@ $$
 
 ### 11.5 完整参数不等于最小参数
 
-本项目使用的是全参数向量，而不是经过符号消元、线性相关约简后的
-最小 base parameter 集。其优点是与 MuJoCo 模型结构对应直接，
-缺点是更容易遭遇不可辨识方向。
+当前 regressor 先构造与模型参数顺序对应的 full/raw 参数列，再由训练轨迹 A 的
+scaled SVD 数值确定基础方向并在 base parameter space 中求解。结果文件仍保存
+raw minimum-norm parameter vector 供审计，但它不是逐项物理恢复的成功标准。
 
 ---
 
@@ -1027,6 +1070,12 @@ $$
 - `dynamics_diagnostic`：诊断动力学项和记录数据的差异
 - `model_comparison`：比较不同动力学模型
 - `regressor_test`：验证回归矩阵与动力学模型的一致性
+- `rebot_mujoco_model_sanity`：检查 reBot-DM MJCF、J1-J6 mapping、actuator 和固定夹爪
+- `rebot_model_consistency_test`：检查 reBot-DM MuJoCo↔Pinocchio 动力学一致性
+- `rebot_phase5a_regressor_test`：检查 60/72/78 列参数布局和 simulation-truth 闭环
+- `rebot_constraint_force_diagnostic`：分解 forward solver 的约束力来源
+- `rebot_excitation_data_quality`：检查实际 A/B 轨迹的 60/72/78 列 rank 和 condition
+- `rebot_identification_model_closure`：解释给定 seed 的 MuJoCo↔回归器 oracle floor
 
 ### 12.2 关键源码位置
 
@@ -1042,6 +1091,9 @@ $$
 - `src/identification/src/algorithms.cpp`：各类辨识算法
 - `src/identification/src/robot/*regressor.cpp`：回归矩阵构造
 - `src/identification/src/robot/*dynamics.cpp`：动力学计算
+- `src/identification/src/robot/rebot_pinocchio_regressor.cpp`：reBot 78 列 augmented regressor
+- `scripts/verify_rebot_excitation_data.py`：reBot A/B 执行安全与数据语义门禁
+- `scripts/verify_rebot_clean_identification.py`：reBot clean identification 结果门禁
 
 ### 12.3 关键配置文件
 
@@ -1049,10 +1101,242 @@ $$
 - `config/identification.yaml`：辨识配置
 - `config/force_controller_node.yaml`：控制器与轨迹参数
 - `config/panda_sim_node.yaml`：仿真器参数
+- `config/rebot_dm_excitation_experiment.yaml`：reBot Fourier 仿真实验入口
+- `config/rebot_dm_excitation_controller.yaml`：reBot 轨迹、控制与安全限制
+- `config/rebot_dm_excitation_sim_node.yaml`：reBot 仿真 truth
+- `config/rebot_dm_clean_identification.yaml`：reBot A-only OLS / B-only validation 配置
 
 ---
 
-## 13. 推荐阅读顺序
+## 13. reBot-DM 仿真辨识完整运行流程
+
+本节记录当前已经通过 Phase 5C 的 **clean synthetic simulation** 流程。正常运行
+应始终显式指定 reBot 配置，不要依赖 `run_experiment` 或 `identify` 的 Piper 默认值。
+
+### 13.1 整体执行顺序
+
+```text
+配置与构建
+  -> model / dynamics / regressor 前置门禁
+  -> seed 20260826 生成训练轨迹 A
+  -> seed 20260829 生成独立验证轨迹 B
+  -> A/B 安全、数据语义、摩擦和 rank 门禁
+  -> A-only scaled SVD 基础空间
+  -> A-only unregularized OLS
+  -> B-only torque prediction
+  -> 结构化结果门禁与旧 baseline 回归
+```
+
+### 13.2 环境准备与构建
+
+先根据当前 shell 选择一条环境命令。zsh：
+
+```zsh
+source /opt/ros/humble/setup.zsh
+```
+
+Bash：
+
+```bash
+source /opt/ros/humble/setup.bash
+```
+
+然后从仓库根目录配置和构建：
+
+```bash
+cmake -S . -B build
+cmake --build build --parallel 4
+```
+
+不要在 zsh 中直接 source `setup.bash`。上述环境命令用于让 CMake 找到当前
+Ubuntu 22.04 环境中的 Pinocchio 及其依赖。
+reBot runtime 还要求 `rebot_dm/assets/` 中的 10 个 accepted binary STL 均存在；
+它们已经在当前仓库完成 vendoring。
+
+### 13.3 前置模型与回归器门禁
+
+在采集激励数据前先确认模型闭环：
+
+```bash
+./build/rebot_mujoco_model_sanity
+./build/rebot_model_consistency_test
+./build/rebot_phase5a_regressor_test
+```
+
+三条命令分别验证 runtime MJCF、MuJoCo↔Pinocchio 动力学一致性，以及
+`60 rigid + 6 armature + 6 damping + 6 frictionloss = 78` 的回归器语义。
+任一命令失败时，不应继续解释后续辨识结果。
+
+### 13.4 快速复核仓库已有产物
+
+如果只想确认当前冻结数据和结果仍然有效，不需要重新运行 60 秒仿真：
+
+```bash
+python3 scripts/verify_rebot_excitation_data.py \
+  --csv data/rebot_dm/excitation_A.csv
+python3 scripts/verify_rebot_excitation_data.py \
+  --csv data/rebot_dm/excitation_B.csv
+
+./build/rebot_excitation_data_quality data/rebot_dm/excitation_A.csv
+./build/rebot_excitation_data_quality data/rebot_dm/excitation_B.csv
+
+python3 scripts/verify_rebot_clean_identification.py \
+  --result results/rebot_dm_clean_identification.yaml
+```
+
+这里 Python gate 检查运行安全、时间、metadata、系数哈希、力矩和 forward
+friction 语义；C++ gate 使用实际轨迹检查 60/72/78 列回归矩阵的 rank 与
+condition；最后一个 gate 检查 A-only OLS 与 B-only prediction 的结构化结果。
+
+### 13.5 从头生成独立 A/B 数据
+
+为避免覆盖仓库中的冻结 baseline，下面把所有新产物写入固定临时目录：
+
+```bash
+RUN_DIR=/tmp/rebot_dm_runbook
+mkdir -p "$RUN_DIR"
+
+./build/run_experiment \
+  --experiment-config config/rebot_dm_excitation_experiment.yaml \
+  --trajectory-seed 20260826 \
+  --headless \
+  --output "$RUN_DIR/excitation_A.csv" \
+  --trajectory-output "$RUN_DIR/excitation_A.trajectory.csv"
+
+./build/run_experiment \
+  --experiment-config config/rebot_dm_excitation_experiment.yaml \
+  --trajectory-seed 20260829 \
+  --headless \
+  --output "$RUN_DIR/excitation_B.csv" \
+  --trajectory-output "$RUN_DIR/excitation_B.trajectory.csv"
+```
+
+每次 `run_experiment` 会同时生成数据 CSV、Fourier 系数 CSV 和 metadata。
+A/B 使用不同固定 seed，不能将同一文件同时作为 training 与 validation。
+
+### 13.6 检查新生成的数据
+
+```bash
+RUN_DIR=/tmp/rebot_dm_runbook
+
+python3 scripts/verify_rebot_excitation_data.py \
+  --csv "$RUN_DIR/excitation_A.csv"
+python3 scripts/verify_rebot_excitation_data.py \
+  --csv "$RUN_DIR/excitation_B.csv"
+
+./build/rebot_excitation_data_quality "$RUN_DIR/excitation_A.csv"
+./build/rebot_excitation_data_quality "$RUN_DIR/excitation_B.csv"
+```
+
+正式进入辨识前，两条轨迹都必须满足：
+
+- 30 s、1 kHz、30,000 samples，所有值 finite 且时间严格递增；
+- `saturation_count = 0`、`unexpected_contact_count = 0`；
+- `q/qd/tau_cmd` 均在配置安全限制内；
+- unit-gear 未饱和条件下 `tau_cmd == tau_effort`；
+- `tau_constraint` 不超过配置的 frictionloss，滑动时不助推运动；
+- J1-J6 都存在 sliding 和 saturated-sliding observations；
+- 78 列实际轨迹回归矩阵在固定阈值下 rank 为 52。
+
+需要单独审计 forward solver 约束力来源时执行：
+
+```bash
+./build/rebot_constraint_force_diagnostic 20260826
+./build/rebot_constraint_force_diagnostic 20260829
+```
+
+该诊断证明当前 runtime scene 的 J1-J6 `tau_constraint` 可按 friction-only
+通道解释，而不是 equality、limit 或 contact 力。
+
+### 13.7 执行 A-only OLS 与 B-only validation
+
+继续使用上面的 `RUN_DIR`：
+
+```bash
+RUN_DIR=/tmp/rebot_dm_runbook
+
+./build/identify \
+  --config config/rebot_dm_clean_identification.yaml \
+  --training-data-file "$RUN_DIR/excitation_A.csv" \
+  --validation-data-file "$RUN_DIR/excitation_B.csv" \
+  --basis-data-file "$RUN_DIR/excitation_A.csv" \
+  --output-file "$RUN_DIR/rebot_dm_clean_identification.yaml"
+
+python3 scripts/verify_rebot_clean_identification.py \
+  --result "$RUN_DIR/rebot_dm_clean_identification.yaml"
+```
+
+`identify` 的固定数据流是：
+
+1. 按 header 精确加载 `q/qd/qdd_mujoco/tau_effort`；
+2. 排除 non-finite、饱和、接触或约束语义无效的 sample；
+3. 只保留 hard-Coulomb 模型有效的 `saturated_sliding` observation rows；
+4. 由 A 的列缩放和 SVD 方向建立 rank-52 基础空间；
+5. 只用 A 执行无 ridge OLS，得到 `beta_hat`；
+6. 将 A 的缩放、基础方向和 `beta_hat` 原样用于 B；
+7. 输出 B 的 aggregate/per-joint torque prediction metrics。
+
+B 可以计算自己的 rank/condition 作为诊断，但不得参与 A 的缩放、基础方向、
+rank threshold、参数拟合或阈值调节。
+
+若要解释特定 seed 的 MuJoCo forward/inverse oracle floor，可额外执行：
+
+```bash
+./build/rebot_identification_model_closure 20260826
+./build/rebot_identification_model_closure 20260829
+```
+
+### 13.8 产物对照
+
+| 产物 | 生成者 | 用途 |
+|---|---|---|
+| `excitation_A.csv` | `run_experiment` | A-only training 与基础空间 |
+| `excitation_B.csv` | `run_experiment` | 独立 B-only validation |
+| `*.trajectory.csv` | `run_experiment` / `ForceController` | 保存接受的 Fourier 系数，用于 replay 和 SHA 审计 |
+| `*.meta.yaml` | `ExperimentRecorder` | 保存模型、配置、seed、truth、字段来源和系数哈希 |
+| `rebot_dm_clean_identification.yaml` | `identify` | 保存 rank、基础方向、`beta_hat`、oracle/训练/验证指标 |
+| `rebot_dm_clean_identification.prediction.csv` | `identify` | 保存逐时刻、逐关节预测和 `included` observation mask |
+
+### 13.9 当前基准与通过标准
+
+当前冻结 Phase 5C 结果为：
+
+```text
+A samples                         = 30000
+B samples                         = 30000
+raw parameter count               = 78
+A base rank                       = 52
+B rank diagnostic                 = 52
+A selected observations           = 84353
+B selected observations           = 77979
+base parameter relative error     = 1.031623182296e-6
+B aggregate RMSE                  = 5.914782183802e-7 Nm
+B global max error                = 3.600941670796e-6 Nm
+```
+
+正式门禁要求：base parameter relative error 不超过 `1e-4`，B aggregate 和
+每关节 RMSE 不超过 `1e-5 Nm`，B global/per-joint max 不超过 `1e-4 Nm`。
+完整 B 的 hard-Coulomb diagnostic 会包含模型不适用的未饱和行，当前约
+`0.01181 Nm`，它不是 Phase 5C PASS metric。
+
+### 13.10 回归检查与适用边界
+
+```bash
+ctest --test-dir build --output-on-failure
+python3 scripts/verify_phase3_gates.py
+```
+
+当前 CTest 应为 4/4 PASS，Piper Phase 3 的 clean、Gaussian、outlier、friction
+门禁也应全部保持 PASS。
+
+本流程只证明已知 synthetic armature/damping/frictionloss truth 下的 clean
+simulation closure。`saturated_sliding` 依赖仿真 oracle truth；78 维 raw minimum-
+norm parameters 仅供审计。当前结果不能解释为真实 reBot 硬件参数，也不包含
+噪声、outlier、IRLS robustness、reBot 真机 backend 或 ROS 链路。
+
+---
+
+## 14. 推荐阅读顺序
 
 若第一次接触本仓库，建议按以下顺序阅读：
 
@@ -1061,11 +1345,12 @@ $$
 3. 第 5 节到第 7 节，理解数据是如何产生并进入辨识流程的；
 4. 第 8 节和第 9 节，理解线性与非线性辨识算法；
 5. 第 10 节和第 11 节，理解如何解释结果以及如何排查异常；
-6. 最后回到第 12 节，按源码入口对应到具体实现。
+6. 需要实际运行 reBot 仿真辨识时，按第 13 节从前置门禁执行到独立 B 验证；
+7. 最后回到第 12 节，按源码入口对应到具体实现。
 
 ---
 
-## 14. 结论
+## 15. 结论
 
 当前仓库已经具备一条完整的参数辨识工程链路，但需要明确区分三件事：
 
