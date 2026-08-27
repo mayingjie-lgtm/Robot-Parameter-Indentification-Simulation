@@ -1,0 +1,91 @@
+from __future__ import annotations
+
+from pathlib import Path
+import sys
+import unittest
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SRC_ROOT = REPO_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from rebot_real.control_adapter import RebotControlAdapter, RebotControlError
+from rebot_real.mock_client import MockArmClient
+
+
+class RebotControlAdapterTest(unittest.TestCase):
+    def _adapter(self, fake: MockArmClient, **overrides) -> RebotControlAdapter:
+        values = {
+            "sdk_root": "",
+            "host": "127.0.0.1",
+            "tcp_port": 5000,
+            "udp_port": 5001,
+            "joint_direction": [1.0] * 6,
+            "joint_offset_rad": [0.0] * 6,
+            "connect_timeout_s": 0.1,
+            "command_timeout_s": 0.1,
+            "state_timeout_s": 0.05,
+            "client_factory": lambda **_: fake,
+            "sleep_fn": lambda _: None,
+        }
+        values.update(overrides)
+        return RebotControlAdapter(**values)
+
+    def test_state_mapping_applies_explicit_direction_and_offset(self) -> None:
+        fake = MockArmClient(
+            position_rad=[1.0, -1.0, -1.2, 0.2, -0.3, 0.4],
+            velocity_rad_s=[0.1, 0.2, -0.3, 0.4, -0.5, 0.6],
+            torque_nm=[1, 2, 3, 4, 5, 6],
+        )
+        adapter = self._adapter(
+            fake,
+            joint_direction=[-1, 1, 1, 1, 1, 1],
+            joint_offset_rad=[0.25, 0, 0, 0, 0, 0],
+        )
+        adapter.connect()
+        state = adapter.read_state()
+        self.assertAlmostEqual(state.q[0], -0.75)
+        self.assertAlmostEqual(state.qd[0], -0.1)
+        self.assertAlmostEqual(state.effort_reported[0], -1.0)
+        self.assertEqual(state.q[1:], (-1.0, -1.2, 0.2, -0.3, 0.4))
+
+    def test_servo_target_preserves_explicit_timestamp_sequence_and_inverse_mapping(self) -> None:
+        fake = MockArmClient()
+        adapter = self._adapter(
+            fake,
+            joint_direction=[-1, 1, 1, 1, 1, 1],
+            joint_offset_rad=[0.2, 0, 0, 0, 0, 0],
+            monotonic_ns_fn=lambda: 123456789,
+        )
+        adapter.connect()
+        adapter.enable()
+        adapter.enter_servo()
+        timestamp, sequence = adapter.send_servo_target([0.0] * 6)
+        self.assertEqual(timestamp, 123456789)
+        self.assertEqual(sequence, 1)
+        self.assertEqual(fake.servo_command_records[0][0], timestamp)
+        self.assertEqual(fake.servo_command_records[0][1], sequence)
+        self.assertAlmostEqual(fake.servo_targets[0][0], 0.2)
+        self.assertEqual(fake.servo_targets[0][1:], (0.0, 0.0, 0.0, 0.0, 0.0))
+
+    def test_servo_target_rejects_non_six_dof_shape(self) -> None:
+        fake = MockArmClient()
+        adapter = self._adapter(fake)
+        adapter.connect()
+        adapter.enable()
+        adapter.enter_servo()
+        with self.assertRaisesRegex(ValueError, "exactly 6"):
+            adapter.send_servo_target([0.0] * 5)
+        self.assertNotIn("servo_joint", fake.calls)
+
+    def test_sdk_command_failure_is_normalized(self) -> None:
+        fake = MockArmClient(fail_on={"enable"})
+        adapter = self._adapter(fake)
+        adapter.connect()
+        with self.assertRaisesRegex(RebotControlError, "enable failed"):
+            adapter.enable()
+
+
+if __name__ == "__main__":
+    unittest.main()

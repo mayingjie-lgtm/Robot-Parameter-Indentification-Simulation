@@ -534,7 +534,7 @@ inverse dynamics / torque regressor
 Identification algorithms
 ```
 
-2026-08-26 起，reBot 真机接入先增加一个**独立 state-only 旁路**，而不是直接实现
+2026-08-26 起，reBot 真机首先增加一个**独立 state-only raw capture 旁路**，而不是直接实现
 `reBot ExperimentBackend`：
 
 ```text
@@ -542,16 +542,56 @@ reBot SDK public UDP JointState
         ↓
 UDP-only state subscriber
         ↓
-reBot hardware CSV + metadata
+rebot_hardware_state_v1 CSV + metadata
         ↓
 offline acceptance analyzer
 ```
 
-该旁路不进入 `ForceController`，不发送任何 motor-changing command，也不复用
-simulation-truth CSV schema；`qdd` 只允许在后续 preprocessing 中离线生成。正式字段、
+该 Phase 6A 旁路不进入 `ForceController`，不创建 TCP control session，也不发送任何
+motor-changing command；`qdd` 只允许在后续 preprocessing 中离线生成。正式字段、
 时间戳/力矩/丢包语义和 J1 unresolved mapping 见
-[`REBOT_HARDWARE_DATA_CONTRACT.md`](REBOT_HARDWARE_DATA_CONTRACT.md)。只有 state-only 真机
-验收完成后，才讨论是否将 reBot SDK 接入 `ExperimentBackend`。
+[`REBOT_HARDWARE_DATA_CONTRACT.md`](REBOT_HARDWARE_DATA_CONTRACT.md)。
+
+2026-08-27 进一步完成了独立的 **reBot hardware control offline integration**，仍然不把
+SDK 强塞进 C++ `ExperimentBackend`：
+
+```text
+config/rebot_real_experiment.yaml
+             ↓
+      RebotControlAdapter
+             ↓
+      external ArmClient
+        ┌────┴────┐
+        ↓         ↓
+ Servo q_target  JointState
+        └────┬────┘
+             ↓
+      RebotHardwareRunner
+       ├── state_only
+       ├── servo_hold
+       └── excitation (trajectory source pending)
+             ↓
+rebot_hardware_experiment_v1 CSV + metadata
+```
+
+该控制路径的真实 Servo command 只有
+`servo_sequence + host_timestamp_ns + target_position_rad[6]`，不包含 `qd/kp/kd/tau_cmd`；
+因此 `tau_cmd_available=false`。上位机只做六轴/finite、mapping、位置限位、速度导出的
+单周期增量、feedback freshness/validity、primary fault 和 Servo 状态等 fail-fast gate，
+lower SDK 的 Servo watchdog、sequence/timestamp、位置/速度/加速度和 fault supervisor 仍是
+权威安全层。详细契约见
+[`REBOT_HARDWARE_CONTROL_CONTRACT.md`](REBOT_HARDWARE_CONTROL_CONTRACT.md)。
+
+Phase 6A raw UDP capture 语义保持不变。Phase 6B 的 `state_only` 会创建 SDK TCP session 以
+获得当前 SDK 的 state publication，因此只能保证**上位机不调用** `enable/enter_servo/
+servo_joint/MoveJ/configure_pvt/gripper`；不能声称 TCP observation session 完全无硬件副作用，
+因为 lower 在 TCP disconnect 时会执行 `disable()`。
+
+C++ `ExperimentBackend` integration 继续 **DEFERRED**：一方面其
+`desired_position/desired_velocity/kp/kd/torque` command contract 与 reBot position-only Servo
+不匹配，另一方面现有 non-simulation recorder 的 finite-difference `qdd` 与 command-torque
+legacy schema 也不适合 reBot 真机辨识。当前 joint mapping hardware verification 仍为
+`PENDING`，J1 convention 仍为 `UNRESOLVED`，所有真实 state/Servo/motion acceptance 均未完成。
 
 优先采用 Pinocchio，是为了避免继续手写第三套机器人动力学和 regressor。
 

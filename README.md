@@ -128,7 +128,61 @@ simulation-truth CSV，以固定相机离线生成 MP4，而不重新执行仿�
 已有输出默认不会被覆盖；确认替换时显式添加 `--overwrite`。该工具需要可用的
 GLFW 显示环境以及 PATH 中的 `ffmpeg`，目前只构建 Linux target。
 
-### 6. 运行 Piper 真机实验
+### 6. reBot 真机离线接入（当前只完成软件/Mock 验收）
+
+reBot-DM 当前**没有**接入 C++ `ExperimentBackend`。真实 SDK 的 Servo command 经审计只有：
+
+```text
+servo_sequence
+host_timestamp_ns
+target_position_rad[6]
+```
+
+也就是只发送 `q_target`，没有 `qd/kp/kd/tau_cmd`。因此 reBot 真机使用独立的 Python
+control adapter / runner / hardware recorder，不能把现有 C++ legacy recorder 的 `tau` 当成
+真实 reBot torque command。
+
+当前安全默认配置是 [`config/rebot_real_experiment.yaml`](config/rebot_real_experiment.yaml)：
+
+```yaml
+control_mode: state_only
+allow_hardware: false
+allow_motion: false
+joint_mapping_verified: false
+j1_convention: UNRESOLVED
+```
+
+本机可直接执行离线 Mock smoke，不会连接真实机械臂：
+
+```bash
+python3 scripts/run_rebot_hardware.py \
+  --config config/rebot_real_experiment.yaml \
+  --mock
+```
+
+输出使用独立 schema `rebot_hardware_experiment_v1`，记录 `q/qd/effort_reported/q_cmd`、
+feedback validity/age、Servo 状态、host/lower timestamp 与 Servo sequence；**不记录**在线
+`qdd`、`tau_cmd`、`current` 或 `q_raw`。完整控制、门禁、CSV 和 metadata 语义见
+[`doc/REBOT_HARDWARE_CONTROL_CONTRACT.md`](doc/REBOT_HARDWARE_CONTROL_CONTRACT.md)。
+
+三个 control mode 当前状态：
+
+- `state_only`：软件流程与 Mock 已实现；真实硬件验收仍 `PENDING`。
+- `servo_hold`：完整 Servo lifecycle 与 fault cleanup 已用 Mock 验证；真实执行仍被默认门禁阻断。
+- `excitation`：门禁已定义，但可信 Fourier source 仍在现有 C++ `ForceController`；为避免复制第二套数学实现，trajectory source integration 仍 `PENDING`，当前会在创建 hardware session 前明确拒绝执行。
+
+Phase 6A 的 UDP-only raw state capture `rebot_hardware_state_v1` 保持独立且不变，见
+[`doc/REBOT_HARDWARE_DATA_CONTRACT.md`](doc/REBOT_HARDWARE_DATA_CONTRACT.md)。特别注意：当前
+SDK 的 TCP session 在 lower disconnect 时会触发 `disable()`，所以 Phase 6B `state_only`
+只能保证上位机不调用 motor-changing command，不能称为完全无硬件副作用的 observation
+contract。
+
+未来切到真机电脑后，至少需要确认/修改：`sdk_root`、`host`、TCP/UDP ports、
+`joint_mapping_verified`、`j1_convention`、`joint_direction`、`joint_offset_rad`、joint limits、
+command limits、feedback freshness threshold 与 control rate。J1 当前 canonical `[-2.8, 2.8]`
+与 SDK `[0, 2*pi]` 冲突仍未解决，禁止自动 wrap 或猜测。
+
+### 7. 运行 Piper 真机实验
 
 真机实验与仿真实验共用同一个入口程序，只是后端不同：
 
@@ -192,7 +246,9 @@ GLFW 显示环境以及 PATH 中的 `ffmpeg`，目前只构建 Linux target。
 ├── src/force_node/       # C++ 控制器、轨迹与碰撞检查
 ├── src/identification/   # 离线参数辨识与诊断工具
 ├── src/piper_real/       # Piper 真机 Python SDK adapter / bridge 逻辑
+├── src/rebot_real/       # reBot raw state capture + 独立 hardware control/Mock integration
 ├── tests/piper_real/     # Piper 真机后端单元测试
+├── tests/rebot_real/     # reBot hardware contract / lifecycle / fault-injection tests
 ├── config/               # 运行配置
 └── doc/                  # 架构、baseline、数学与实验说明
 ```

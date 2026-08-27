@@ -1,0 +1,39 @@
+# reBot-DM real-hardware experiment configuration.
+# Safe by default: this file cannot create a real hardware session or motion.
+
+sdk_root: ""
+host: "127.0.0.1"
+tcp_port: 5000
+udp_port: 5001
+
+control_mode: state_only        # state_only | servo_hold | excitation
+control_rate_hz: 100.0
+duration_s: 0.1
+max_samples: 5
+output_csv: data/rebot_real/hardware_experiment.csv
+
+allow_hardware: false
+allow_motion: false
+
+# Hardware mapping is intentionally unresolved. Do not change these gates based on
+# simulation/model assumptions; fill them only after real-joint convention verification.
+joint_mapping_verified: false
+j1_convention: UNRESOLVED
+joint_direction: [1, 1, 1, 1, 1, 1]
+joint_offset_rad: [0, 0, 0, 0, 0, 0]
+
+# Canonical model limits are placeholders for the upper fail-fast gate. J1 conflicts
+# with the current SDK [0, 2*pi] deployment limit and therefore remains unresolved.
+joint_position_min_rad: [-2.8, -3.14, -3.14, -1.87, -1.57, -3.14]
+joint_position_max_rad: [2.8, 0.0, 0.0, 1.57, 1.57, 3.14]
+maximum_command_velocity_rad_s: [0.05, 0.05, 0.05, 0.05, 0.05, 0.05]
+maximum_feedback_age_ms: 50.0
+
+connect_timeout_s: 3.0
+command_timeout_s: 3.0
+state_timeout_s: 0.25
+
+# The trusted reBot Fourier implementation currently lives in C++ ForceController.
+# Offline Phase 6B intentionally does not duplicate that math in Python.
+trajectory_source: pending_cxx_fourier_integration
+trajectory_hash: null
