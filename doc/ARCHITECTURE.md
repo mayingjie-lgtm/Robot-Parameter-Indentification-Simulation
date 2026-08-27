@@ -501,7 +501,7 @@ inverse dynamics implementation
 
 > 2026-08-25 Phase 4A 已完成：仓库已加入 `rebot_dm/` dynamics-only canonical URDF/MJCF、显式零 armature/damping/friction simulation truth、J1–J6 六个 direct torque actuator，以及最小 `ReBotPinocchioDynamics` wrapper。full URDF 先加载 8-DoF 模型，再把两个 gripper joint 固定在经源 mesh 验证无自碰撞的 `[0.05, 0.05] m`，得到 `nq=6,nv=6` reduced model。MuJoCo↔Pinocchio gravity、`M(q)`、inverse dynamics 与 rigid-body `Y*theta` 均达到约 `1e-15` 数值闭环，Phase 3 Piper gates 保持不变。详见 [`PHASE4_REBOT_DM_MODEL_BASELINE.md`](PHASE4_REBOT_DM_MODEL_BASELINE.md)。
 >
-> 2026-08-25 Phase 4B 已完成最小 `rebot_dm -> ForceController(hold_position) -> SimulationBackend -> MuJoCo -> ExperimentRecorder` 代码接入，并用 accepted 完整 mesh 验证 6DOF actuator mapping、无饱和/无意外 contact、`tau_cmd == qfrc_actuator` 和 Phase 3 CSV/metadata semantics。当前唯一 blocker 是十个 binary STL 尚未 physically vendored 到 `rebot_dm/assets/`，因此 Phase 4B 暂不能标 PASS；详见 [`PHASE4B_REBOT_RUNTIME_BASELINE.md`](PHASE4B_REBOT_RUNTIME_BASELINE.md)。
+> 2026-08-25 Phase 4B 已完成最小 `rebot_dm -> ForceController(hold_position) -> SimulationBackend -> MuJoCo -> ExperimentRecorder` 代码接入，并用 accepted 完整 mesh 验证 6DOF actuator mapping、无饱和/无意外 contact、`tau_cmd == qfrc_actuator` 和 Phase 3 CSV/metadata semantics。后续 STL 已补齐，Phase 5A/5B/5C 的 regressor、激励质量与 clean identification gates 也已完成；详见对应 Phase 4B/5 baseline 文档。
 
 目标结构：
 
@@ -533,6 +533,25 @@ inverse dynamics / torque regressor
    ↓
 Identification algorithms
 ```
+
+2026-08-26 起，reBot 真机接入先增加一个**独立 state-only 旁路**，而不是直接实现
+`reBot ExperimentBackend`：
+
+```text
+reBot SDK public UDP JointState
+        ↓
+UDP-only state subscriber
+        ↓
+reBot hardware CSV + metadata
+        ↓
+offline acceptance analyzer
+```
+
+该旁路不进入 `ForceController`，不发送任何 motor-changing command，也不复用
+simulation-truth CSV schema；`qdd` 只允许在后续 preprocessing 中离线生成。正式字段、
+时间戳/力矩/丢包语义和 J1 unresolved mapping 见
+[`REBOT_HARDWARE_DATA_CONTRACT.md`](REBOT_HARDWARE_DATA_CONTRACT.md)。只有 state-only 真机
+验收完成后，才讨论是否将 reBot SDK 接入 `ExperimentBackend`。
 
 优先采用 Pinocchio，是为了避免继续手写第三套机器人动力学和 regressor。
 
