@@ -164,6 +164,8 @@ python3 scripts/run_rebot_hardware.py \
 feedback validity/age、Servo 状态、host/lower timestamp 与 Servo sequence；**不记录**在线
 `qdd`、`tau_cmd`、`current` 或 `q_raw`。完整控制、门禁、CSV 和 metadata 语义见
 [`doc/REBOT_HARDWARE_CONTROL_CONTRACT.md`](doc/REBOT_HARDWARE_CONTROL_CONTRACT.md)。
+接上实机后的逐步检查、状态采集、关节映射和 Servo 保持操作见
+[`doc/REBOT_REAL_HARDWARE_RUNBOOK.md`](doc/REBOT_REAL_HARDWARE_RUNBOOK.md)。
 
 三个 control mode 当前状态：
 
