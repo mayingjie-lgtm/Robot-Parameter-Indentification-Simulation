@@ -60,6 +60,10 @@ class RebotHardwareRunnerTest(unittest.TestCase):
         self.assertEqual(config["j1_convention"], "UNRESOLVED")
         self.assertEqual(len(config["joint_direction"]), 6)
         self.assertEqual(len(config["joint_offset_rad"]), 6)
+        self.assertEqual(
+            config["maximum_disabled_feedback_age_ms"],
+            config["maximum_feedback_age_ms"],
+        )
 
     def test_real_backend_default_deny_hardware_creates_no_session(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -164,8 +168,18 @@ class RebotHardwareRunnerTest(unittest.TestCase):
             config = self._servo_config(directory)
             fake = MockArmClient()
             runner = self._runner(config, fake)
+            q_reference = [
+                0.5 * (lower + upper)
+                for lower, upper in zip(
+                    config["joint_position_min_rad"],
+                    config["joint_position_max_rad"],
+                )
+            ]
+            q_target = list(q_reference)
+            q_reference[0] = config["joint_position_max_rad"][0]
+            q_target[0] = config["joint_position_max_rad"][0] + 0.1
             with self.assertRaisesRegex(RebotControlError, "outside configured position limits"):
-                runner._validate_command([3.0, -1.0, -1.0, 0.0, 0.0, 0.0], [2.9999, -1, -1, 0, 0, 0])
+                runner._validate_command(q_target, q_reference)
 
     def test_command_velocity_derived_delta_rejection(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -183,6 +197,38 @@ class RebotHardwareRunnerTest(unittest.TestCase):
             with self.assertRaisesRegex(RebotControlError, "feedback stale"):
                 self._runner(config, fake).run()
             self.assertEqual(fake.calls[-1], "close")
+
+    def test_servo_uses_separate_disabled_and_enabled_feedback_age_limits(self) -> None:
+        class FreshAfterEnableMock(MockArmClient):
+            def enable(self, timeout_s: float = 5.0):
+                reply = super().enable(timeout_s=timeout_s)
+                self.feedback_age_ms = (1.0,) * 6
+                return reply
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._servo_config(directory)
+            config["maximum_disabled_feedback_age_ms"] = 110.0
+            config["maximum_feedback_age_ms"] = 50.0
+            fake = FreshAfterEnableMock(feedback_age_ms=[100.0] * 6)
+            self._runner(config, fake).run()
+            self.assertIn("enable", fake.calls)
+            self.assertIn("servo_joint", fake.calls)
+
+    def test_servo_rejects_stale_feedback_after_enable_and_disables(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._servo_config(directory)
+            config["maximum_disabled_feedback_age_ms"] = 110.0
+            config["maximum_feedback_age_ms"] = 50.0
+            fake = MockArmClient(feedback_age_ms=[100.0] * 6)
+            with self.assertRaisesRegex(
+                RebotControlError,
+                "maximum_feedback_age_ms=50.0",
+            ):
+                self._runner(config, fake).run()
+            self.assertEqual(
+                fake.calls,
+                ["connect", "read_state", "enable", "read_state", "disable", "close"],
+            )
 
     def test_invalid_feedback_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -397,8 +397,13 @@ joint_position_min_rad
 joint_position_max_rad
 maximum_command_velocity_rad_s
 maximum_feedback_age_ms
+maximum_disabled_feedback_age_ms
 control_rate_hz
 ```
+
+`maximum_disabled_feedback_age_ms` 仅适用于失能状态观测和 Servo 使能前检查；省略或
+设为 `null` 时回退到 `maximum_feedback_age_ms`，保持旧配置行为。使能完成后以及整个
+Servo 生命周期始终使用更严格的 `maximum_feedback_age_ms`。
 
 Recommended real acceptance order remains:
 

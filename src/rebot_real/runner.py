@@ -47,6 +47,7 @@ def load_hardware_config(
         "joint_position_max_rad": [2.8, 0.0, 0.0, 1.57, 1.57, 3.14],
         "maximum_command_velocity_rad_s": [0.05] * JOINT_COUNT,
         "maximum_feedback_age_ms": 50.0,
+        "maximum_disabled_feedback_age_ms": None,
         "connect_timeout_s": 3.0,
         "command_timeout_s": 3.0,
         "state_timeout_s": 0.25,
@@ -97,13 +98,14 @@ def load_hardware_config(
             raise ValueError("each joint position minimum must be smaller than maximum")
     if any(value <= 0.0 for value in config["maximum_command_velocity_rad_s"]):
         raise ValueError("maximum_command_velocity_rad_s values must be positive")
-    for name in (
-        "maximum_feedback_age_ms",
-        "connect_timeout_s",
-        "command_timeout_s",
-        "state_timeout_s",
-    ):
+    for name in ("maximum_feedback_age_ms", "connect_timeout_s", "command_timeout_s", "state_timeout_s"):
         config[name] = _positive(config[name], name)
+    disabled_age = config["maximum_disabled_feedback_age_ms"]
+    config["maximum_disabled_feedback_age_ms"] = (
+        config["maximum_feedback_age_ms"]
+        if disabled_age is None
+        else _positive(disabled_age, "maximum_disabled_feedback_age_ms")
+    )
 
     root = Path(repo_root) if repo_root is not None else Path(__file__).resolve().parents[2]
     output = Path(str(config["output_csv"])).expanduser()
@@ -202,7 +204,11 @@ class RebotHardwareRunner:
         samples = 0
         while not self._done(start, samples):
             state = adapter.read_state()
-            self._validate_state(state, require_servo_active=None)
+            self._validate_state(
+                state,
+                require_servo_active=None,
+                feedback_age_limit_key="maximum_disabled_feedback_age_ms",
+            )
             recorder.record(
                 state,
                 q_cmd=None,
@@ -223,7 +229,11 @@ class RebotHardwareRunner:
         """Hold the freshly re-read current position through the audited Servo lifecycle."""
 
         initial = adapter.read_state()
-        self._validate_state(initial, require_servo_active=False)
+        self._validate_state(
+            initial,
+            require_servo_active=False,
+            feedback_age_limit_key="maximum_disabled_feedback_age_ms",
+        )
         adapter.enable()
         session["enabled"] = True
 
@@ -277,6 +287,7 @@ class RebotHardwareRunner:
         state: CaptureSample,
         *,
         require_servo_active: bool | None,
+        feedback_age_limit_key: str = "maximum_feedback_age_ms",
     ) -> None:
         if not all(state.feedback_valid):
             raise RebotControlError("invalid joint feedback blocks hardware runner")
@@ -291,10 +302,10 @@ class RebotHardwareRunner:
         ):
             if len(values) != JOINT_COUNT or not all(math.isfinite(value) for value in values):
                 raise RebotControlError(f"{name} feedback must contain six finite values")
-        max_age = float(self.config["maximum_feedback_age_ms"])
+        max_age = float(self.config[feedback_age_limit_key])
         if any(value > max_age for value in state.feedback_age_ms):
             raise RebotControlError(
-                f"feedback stale: age exceeds maximum_feedback_age_ms={max_age}"
+                f"feedback stale: age exceeds {feedback_age_limit_key}={max_age}"
             )
         for index, value in enumerate(state.q):
             lower = self.config["joint_position_min_rad"][index]

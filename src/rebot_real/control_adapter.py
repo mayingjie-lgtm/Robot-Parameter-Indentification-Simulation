@@ -238,10 +238,26 @@ def _load_arm_client_class(sdk_root: Path) -> Callable[..., Any]:
 
     if not str(sdk_root):
         raise FileNotFoundError("sdk_root is empty")
-    python_root = sdk_root.expanduser().resolve() / "upper" / "python"
-    client_path = python_root / "wlsea_arm_sdk" / "client.py"
-    if not client_path.is_file():
-        raise FileNotFoundError(f"SDK ArmClient not found: {client_path}")
+    sdk_root_path = sdk_root.expanduser().resolve()
+    python_roots = (
+        sdk_root_path / "upper" / "python",
+        sdk_root_path / "src",
+    )
+    client_path = next(
+        (
+            python_root / "wlsea_arm_sdk" / "client.py"
+            for python_root in python_roots
+            if (python_root / "wlsea_arm_sdk" / "client.py").is_file()
+        ),
+        None,
+    )
+    if client_path is None:
+        expected_paths = ", ".join(
+            str(python_root / "wlsea_arm_sdk" / "client.py")
+            for python_root in python_roots
+        )
+        raise FileNotFoundError(f"SDK ArmClient not found; checked: {expected_paths}")
+    python_root = client_path.parent.parent
 
     existing = sys.modules.get("wlsea_arm_sdk.client")
     if existing is not None:

@@ -161,6 +161,9 @@ def build_hardware_metadata(
         "joint_position_max_rad": list(config["joint_position_max_rad"]),
         "maximum_command_velocity_rad_s": list(config["maximum_command_velocity_rad_s"]),
         "maximum_feedback_age_ms": float(config["maximum_feedback_age_ms"]),
+        "maximum_disabled_feedback_age_ms": float(
+            config["maximum_disabled_feedback_age_ms"]
+        ),
         "connect_timeout_s": float(config["connect_timeout_s"]),
         "command_timeout_s": float(config["command_timeout_s"]),
         "state_timeout_s": float(config["state_timeout_s"]),
@@ -205,7 +208,10 @@ def build_hardware_metadata(
             "command_position_limit": True,
             "velocity_derived_delta_limit": True,
             "feedback_validity": True,
-            "feedback_age_limit_ms": float(config["maximum_feedback_age_ms"]),
+            "disabled_feedback_age_limit_ms": float(
+                config["maximum_disabled_feedback_age_ms"]
+            ),
+            "enabled_feedback_age_limit_ms": float(config["maximum_feedback_age_ms"]),
             "primary_fault_gate": True,
             "servo_state_gate": True,
             "communication_timeout_s": float(config["state_timeout_s"]),

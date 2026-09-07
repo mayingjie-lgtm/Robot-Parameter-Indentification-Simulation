@@ -73,9 +73,17 @@ class UdpStateSubscriber:
 def _load_protocol_module(sdk_root: Path) -> ModuleType:
     """Load only the SDK protocol decoder; never import/construct ArmClient."""
 
-    protocol_path = sdk_root / "upper" / "python" / "wlsea_arm_sdk" / "protocol.py"
-    if not protocol_path.is_file():
-        raise FileNotFoundError(f"SDK protocol.py not found: {protocol_path}")
+    protocol_candidates = (
+        sdk_root / "upper" / "python" / "wlsea_arm_sdk" / "protocol.py",
+        sdk_root / "src" / "wlsea_arm_sdk" / "protocol.py",
+    )
+    protocol_path = next(
+        (candidate for candidate in protocol_candidates if candidate.is_file()),
+        None,
+    )
+    if protocol_path is None:
+        expected_paths = ", ".join(str(candidate) for candidate in protocol_candidates)
+        raise FileNotFoundError(f"SDK protocol.py not found; checked: {expected_paths}")
     spec = importlib.util.spec_from_file_location("_rebot_sdk_protocol", protocol_path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot load SDK protocol module: {protocol_path}")
@@ -96,14 +104,16 @@ def _load_protocol_module(sdk_root: Path) -> ModuleType:
 def detect_sdk_version(sdk_root: str | Path) -> str:
     """Read the handoff package version without importing the full SDK package."""
 
-    init_path = (
-        Path(sdk_root).expanduser().resolve()
-        / "upper"
-        / "python"
-        / "wlsea_arm_sdk"
-        / "__init__.py"
+    sdk_root_path = Path(sdk_root).expanduser().resolve()
+    init_candidates = (
+        sdk_root_path / "upper" / "python" / "wlsea_arm_sdk" / "__init__.py",
+        sdk_root_path / "src" / "wlsea_arm_sdk" / "__init__.py",
     )
-    if not init_path.is_file():
+    init_path = next(
+        (candidate for candidate in init_candidates if candidate.is_file()),
+        None,
+    )
+    if init_path is None:
         return "unknown"
     match = re.search(
         r'^__version__\s*=\s*["\']([^"\']+)["\']',

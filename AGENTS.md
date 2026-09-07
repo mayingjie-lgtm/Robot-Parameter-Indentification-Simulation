@@ -14,6 +14,8 @@ For the current development phase, also read:
 3. `doc/PHASE1_MINIMAL_PLAN.md`
 4. `doc/PHASE1_BASELINE.md` if it exists
 
+SDK：/home/j/j_ws/src/wlsea_rebot_b601_upper_20260904
+
 Use `README.md` for build/run instructions.
 
 Do not treat `plan.md` as the current architecture unless explicitly requested.
