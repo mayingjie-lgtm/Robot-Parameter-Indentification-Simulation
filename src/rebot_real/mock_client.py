@@ -30,6 +30,7 @@ class MockArmClient:
         primary_fault_code: int = 0,
         safety_state: str = "disabled",
         disconnect_after_state_reads: int | None = None,
+        follow_servo_targets: bool = False,
     ) -> None:
         self.host = host
         self.tcp_port = int(tcp_port)
@@ -46,6 +47,7 @@ class MockArmClient:
         self.primary_fault_code = int(primary_fault_code)
         self.safety_state = str(safety_state)
         self.disconnect_after_state_reads = disconnect_after_state_reads
+        self.follow_servo_targets = bool(follow_servo_targets)
         self.calls: list[str] = []
         self.servo_targets: list[tuple[float, ...]] = []
         self.servo_command_records: list[tuple[int, int, tuple[float, ...]]] = []
@@ -141,6 +143,9 @@ class MockArmClient:
         self.servo_mode = "servo"
         self.servo_targets.append(target)
         self.servo_command_records.append((timestamp, sequence, target))
+        if self.follow_servo_targets:
+            # Ideal encoder response only: no dynamics, gravity, backlash or noise.
+            self.position_rad = list(target)
         request_id = self._request_id
         self._request_id += 1
         return request_id, sequence

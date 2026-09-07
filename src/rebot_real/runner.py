@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from pathlib import Path
 import time
@@ -9,10 +11,11 @@ import yaml
 
 from .control_adapter import RebotControlAdapter, RebotControlError
 from .hardware_recorder import HardwareExperimentRecorder
+from .joint_jog import jog_target_at, validate_joint_jog
 from .state_capture import CaptureSample, JOINT_COUNT
 
 
-CONTROL_MODES = {"state_only", "servo_hold", "excitation"}
+CONTROL_MODES = {"state_only", "servo_hold", "joint_jog", "excitation"}
 
 
 def load_hardware_config(
@@ -41,6 +44,8 @@ def load_hardware_config(
         "allow_motion": False,
         "joint_mapping_verified": False,
         "j1_convention": "UNRESOLVED",
+        "joint_mapping_scope": "servo_hold_only",
+        "joint_jog": None,
         "joint_direction": [1.0] * JOINT_COUNT,
         "joint_offset_rad": [0.0] * JOINT_COUNT,
         "joint_position_min_rad": [-2.8, -3.14, -3.14, -1.87, -1.57, -3.14],
@@ -83,6 +88,8 @@ def load_hardware_config(
         if not isinstance(config[name], bool):
             raise ValueError(f"{name} must be a YAML boolean")
     config["j1_convention"] = str(config["j1_convention"]).strip() or "UNRESOLVED"
+    if config["joint_mapping_scope"] not in {"servo_hold_only", "joint_jog"}:
+        raise ValueError("joint_mapping_scope must be servo_hold_only or joint_jog")
     config["joint_direction"] = list(_six_finite(config["joint_direction"], "joint_direction"))
     if any(abs(value) != 1.0 for value in config["joint_direction"]):
         raise ValueError("joint_direction values must be exactly -1 or 1")
@@ -113,6 +120,8 @@ def load_hardware_config(
         output = root / output
     config["output_csv"] = str(output)
     config["trajectory_source"] = str(config["trajectory_source"])
+    if config["control_mode"] == "joint_jog":
+        validate_joint_jog(config)
     return config
 
 
@@ -143,6 +152,10 @@ class RebotHardwareRunner:
 
         mode = str(self.config["control_mode"])
         self._assert_session_authorized(mode)
+        if mode == "joint_jog":
+            output = Path(self.config["output_csv"])
+            if output.exists() or output.with_suffix(".meta.yaml").exists():
+                raise FileExistsError("joint_jog requires new output paths; existing evidence is not overwritten")
         if mode == "excitation":
             raise RuntimeError(
                 "excitation trajectory source integration remains pending; the trusted Fourier "
@@ -177,10 +190,14 @@ class RebotHardwareRunner:
                 self._run_state_only(adapter, recorder)
             elif mode == "servo_hold":
                 self._run_servo_hold(adapter, recorder, session)
+            elif mode == "joint_jog":
+                self._run_joint_jog(adapter, recorder, session)
             else:
                 raise AssertionError(f"unhandled control mode {mode}")
-        except Exception as exc:
+        except BaseException as exc:
             cleanup_errors = self._shutdown(adapter, session, error_path=True)
+            if recorder.run_result is not None:
+                recorder.run_result.update(status="aborted", error=f"{type(exc).__name__}: {exc}", cleanup_errors=cleanup_errors)
             metadata = recorder.close()
             if cleanup_errors:
                 raise RebotControlError(
@@ -188,6 +205,8 @@ class RebotHardwareRunner:
                 ) from exc
             raise
         cleanup_errors = self._shutdown(adapter, session, error_path=False)
+        if recorder.run_result is not None:
+            recorder.run_result.update(status="aborted" if cleanup_errors else "completed", cleanup_errors=cleanup_errors)
         metadata = recorder.close()
         if cleanup_errors:
             raise RebotControlError(f"cleanup failures: {'; '.join(cleanup_errors)}")
@@ -271,16 +290,159 @@ class RebotHardwareRunner:
         adapter.exit_servo()
         session["servo"] = False
 
+    def _run_joint_jog(
+        self,
+        adapter: RebotControlAdapter,
+        recorder: HardwareExperimentRecorder,
+        session: dict[str, bool],
+    ) -> None:
+        """Run one signed excursion and return, with evidence and no inferred zero."""
+        jog = validate_joint_jog(self.config)
+        joint = jog["joint"] - 1
+        result: dict[str, Any] = {
+            "status": "running", "identification_ready": False,
+            "physical_mapping_verified_by_test": False,
+            "joint": joint + 1, "authorization_reference": jog["authorization_reference"],
+            "requested_displacement_rad": jog["displacement_rad"],
+            "phase_sample_ranges": {}, "stationary_windows": {},
+            "maximum_abs_drift_from_origin_rad": [0.0] * JOINT_COUNT,
+            "maximum_abs_error_to_previous_command_rad": [0.0] * JOINT_COUNT,
+        }
+        recorder.run_result = result
+        initial = adapter.read_state()
+        self._validate_state(initial, require_servo_active=False,
+                             feedback_age_limit_key="maximum_disabled_feedback_age_ms")
+        if initial.robot_mode != "disabled" or initial.safety_state != "disabled":
+            raise RebotControlError("joint_jog requires an initially disabled robot")
+        self._validate_jog_envelope(initial.q, jog)
+        # Set intent first: an ACK timeout can occur after lower has acted.
+        session["enabled"] = True
+        adapter.enable()
+        state = adapter.read_state()
+        self._validate_state(state, require_servo_active=False)
+        self._validate_jog_envelope(state.q, jog)
+        for index in range(JOINT_COUNT):
+            if abs(state.q[index] - initial.q[index]) > jog["maximum_other_joint_drift_rad"]:
+                raise RebotControlError("joint_jog position changed excessively during enable")
+        origin = tuple(state.q)
+        result["origin_rad"] = list(origin)
+        recorder.config["trajectory_source"] = "single_joint_quintic_round_trip_v1"
+        recorder.config["trajectory_hash"] = hashlib.sha256(json.dumps({
+            "origin_rad": origin, "joint_jog": self.config["joint_jog"],
+            "joint_direction": self.config["joint_direction"],
+            "joint_offset_rad": self.config["joint_offset_rad"],
+        }, sort_keys=True, allow_nan=False).encode("utf-8")).hexdigest()
+        session["servo"] = session["motion_lifecycle"] = True
+        adapter.enter_servo()
+        state = adapter.read_state()
+        self._validate_state(state, require_servo_active=True)
+        start = self.monotonic_fn()
+        previous_time: float | None = None
+        previous_velocity = [0.0] * JOINT_COUNT
+        previous_dt = 1 / self.config["control_rate_hz"]
+        previous_target = origin
+        window_m2: dict[str, list[float]] = {}
+        while True:
+            now = self.monotonic_fn()
+            elapsed = now - start
+            phase, target, stationary_sample = jog_target_at(jog, origin, elapsed)
+            if now - start >= self.config["duration_s"]:
+                raise RebotControlError("joint_jog timeout; round trip incomplete")
+            dt = 1 / self.config["control_rate_hz"] if previous_time is None else now - previous_time
+            if dt <= 0 or dt > jog["maximum_command_gap_s"]:
+                raise RebotControlError("joint_jog command gap exceeded; no catch-up or automatic return")
+            self._validate_state(state, require_servo_active=True)
+            # Keep both existing measured-state delta and consecutive-command gates.
+            self._validate_command(target, state.q)
+            self._validate_command(target, previous_target)
+            velocity = [(target[i] - previous_target[i]) / dt for i in range(JOINT_COUNT)]
+            for index in range(JOINT_COUNT):
+                if abs(velocity[index]) > self.config["maximum_command_velocity_rad_s"][index] + 1e-12:
+                    raise RebotControlError("joint_jog timed command velocity exceeded")
+                acceleration_dt = (dt + previous_dt) / 2
+                if abs(velocity[index] - previous_velocity[index]) / acceleration_dt > jog["maximum_acceleration_rad_s2"] + 1e-12:
+                    raise RebotControlError("joint_jog timed command acceleration exceeded")
+            timestamp_ns, sequence = adapter.send_servo_target(target)
+            recorder.record(state, q_cmd=target, timestamp_host_command_ns=timestamp_ns,
+                            servo_sequence=sequence, command_valid=True, control_mode="joint_jog")
+            bounds = result["phase_sample_ranges"].setdefault(phase, [recorder.sample_count - 1, recorder.sample_count - 1])
+            bounds[1] = recorder.sample_count - 1
+            self._sleep_period()
+            state = adapter.read_state()
+            self._validate_state(state, require_servo_active=True)
+            # Preserve the observation that caused an abort; no new command is implied.
+            recorder.record(state, q_cmd=None, timestamp_host_command_ns=None,
+                            servo_sequence=None, command_valid=False, control_mode="joint_jog")
+            bounds[1] = recorder.sample_count - 1
+            after_read = self.monotonic_fn()
+            if after_read - start >= self.config["duration_s"]:
+                raise RebotControlError("joint_jog timeout; round trip incomplete")
+            if after_read - now > jog["maximum_command_gap_s"]:
+                raise RebotControlError("joint_jog command gap exceeded; no catch-up or automatic return")
+            for index in range(JOINT_COUNT):
+                drift = abs(state.q[index] - origin[index])
+                error = abs(state.q[index] - target[index])
+                result["maximum_abs_drift_from_origin_rad"][index] = max(result["maximum_abs_drift_from_origin_rad"][index], drift)
+                result["maximum_abs_error_to_previous_command_rad"][index] = max(result["maximum_abs_error_to_previous_command_rad"][index], error)
+                if index != joint and drift > jog["maximum_other_joint_drift_rad"]:
+                    raise RebotControlError(f"joint_jog non-target joint {index + 1} drift exceeded")
+            if stationary_sample:
+                if any(abs(state.q[i] - target[i]) > jog["settle_position_tolerance_rad"] for i in range(JOINT_COUNT)):
+                    raise RebotControlError(f"joint_jog {phase}: position not settled")
+                if any(abs(value) > jog["settle_velocity_tolerance_rad_s"] for value in state.qd):
+                    raise RebotControlError(f"joint_jog {phase}: velocity not settled")
+                window = result["stationary_windows"].setdefault(phase, {
+                    "sample_count": 0, "mean_rad": [0.0] * JOINT_COUNT,
+                    "stddev_rad": [0.0] * JOINT_COUNT,
+                })
+                m2 = window_m2.setdefault(phase, [0.0] * JOINT_COUNT)
+                window["sample_count"] += 1
+                for index, value in enumerate(state.q):
+                    delta = value - window["mean_rad"][index]
+                    window["mean_rad"][index] += delta / window["sample_count"]
+                    m2[index] += delta * (value - window["mean_rad"][index])
+                    window["stddev_rad"][index] = math.sqrt(max(0.0, m2[index] / window["sample_count"]))
+            previous_target, previous_time, previous_velocity = target, now, velocity
+            previous_dt = dt
+            if elapsed >= jog["nominal_duration_s"]:
+                break
+        if any(result["stationary_windows"].get(phase, {}).get("sample_count", 0) < 2
+               for phase in ("baseline", "endpoint", "returned")):
+            raise RebotControlError("joint_jog insufficient stationary samples")
+        baseline = result["stationary_windows"]["baseline"]["mean_rad"]
+        endpoint = result["stationary_windows"]["endpoint"]["mean_rad"]
+        returned = result["stationary_windows"]["returned"]["mean_rad"]
+        result["measured_displacement_rad"] = [endpoint[i] - baseline[i] for i in range(JOINT_COUNT)]
+        result["return_error_rad"] = [returned[i] - baseline[i] for i in range(JOINT_COUNT)]
+        adapter.exit_servo()
+        session["servo"] = False
+
+    def _validate_jog_envelope(self, origin: Sequence[float], jog: dict[str, Any]) -> None:
+        for index, value in enumerate(origin):
+            endpoint = value + (jog["displacement_rad"] if index == jog["joint"] - 1 else 0.0)
+            lower = self.config["joint_position_min_rad"][index] + jog["position_margin_rad"]
+            upper = self.config["joint_position_max_rad"][index] - jog["position_margin_rad"]
+            if not lower <= min(value, endpoint) <= max(value, endpoint) <= upper:
+                raise RebotControlError(f"joint_jog envelope joint {index + 1} violates position limits/margin")
+
     def _assert_session_authorized(self, mode: str) -> None:
         if not self.mock_backend and not self.config["allow_hardware"]:
             raise PermissionError("allow_hardware=false blocks creation of a real ArmClient session")
-        if mode in {"servo_hold", "excitation"}:
+        if mode in {"servo_hold", "joint_jog", "excitation"}:
             if not self.config["allow_motion"]:
                 raise PermissionError("allow_motion=false blocks all motor-changing commands")
             if not self.config["joint_mapping_verified"]:
                 raise PermissionError("joint_mapping_verified=false blocks all motor-changing commands")
             if self.config["j1_convention"] == "UNRESOLVED":
                 raise PermissionError("j1_convention=UNRESOLVED blocks all motor-changing commands")
+        if mode == "joint_jog":
+            validate_joint_jog(self.config)
+            if self.config.get("joint_mapping_scope") != "joint_jog":
+                raise PermissionError("joint_jog requires joint_mapping_scope=joint_jog; hold-only acceptance is insufficient")
+            if self.config["j1_convention"] == "PHYSICAL_MARK_PI_CENTERED_VISUAL_20260907":
+                raise PermissionError("historical J1 convention is accepted for servo_hold smoke only")
+            if not self.mock_backend and self.config["j1_convention"].startswith("MOCK"):
+                raise PermissionError("Mock mapping cannot authorize real joint_jog")
 
     def _validate_state(
         self,

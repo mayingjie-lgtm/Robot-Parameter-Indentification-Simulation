@@ -55,6 +55,7 @@ class HardwareExperimentRecorder:
         self.repo_root = Path(repo_root)
         self.backend = str(backend)
         self.sample_count = 0
+        self.run_result: dict[str, Any] | None = None
         self.csv_path.parent.mkdir(parents=True, exist_ok=True)
         self._stream = self.csv_path.open("w", encoding="utf-8", newline="")
         self._writer = csv.DictWriter(self._stream, fieldnames=CSV_COLUMNS)
@@ -115,6 +116,10 @@ class HardwareExperimentRecorder:
                 backend=self.backend,
                 observed_sample_count=self.sample_count,
             )
+            if self.run_result is not None:
+                metadata["joint_jog_result"] = self.run_result
+                metadata["joint_jog_config"] = self.config["joint_jog"]
+                metadata["joint_mapping_scope"] = self.config["joint_mapping_scope"]
             self.metadata_path.write_text(
                 yaml.safe_dump(metadata, sort_keys=False, allow_unicode=True),
                 encoding="utf-8",

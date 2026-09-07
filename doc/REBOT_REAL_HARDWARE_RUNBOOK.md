@@ -2,7 +2,7 @@
 
 > 本文同时给出 **2026-09-07 当前已可执行能力** 与 **reBot 真机系统辨识完整目标流程**。
 >
-> 当前仓库可直接执行到：`state_only`、`servo_hold`；小幅轨迹、Fourier 激励、真机数据预处理和真机参数辨识仍有明确软件/标定门禁，文中统一标记为 `PENDING`，不得把目标步骤误认为已经实现。
+> 当前仓库已有 `state_only`、真实 `servo_hold` 记录、单轴往返 `joint_jog`（软件/Mock 验证，实机 commissioning PENDING）和 `rebot_trajectory_renderer` 离线 MP4 回放；六轴真机轨迹 provider、同一 artifact 的 exact-command preview/验收、真机数据预处理和真机参数辨识仍有明确软件/标定门禁，不得把目标步骤误认为已经实现。
 >
 > 任一步不通过，立即停止，不跳过门禁。仿真数值门限、simulation truth 和 MuJoCo-only 字段不得直接搬到真机。
 
@@ -274,47 +274,36 @@ PASS 条件：正常结束、样本数大于零、CSV/metadata 已生成、无�
 注意：该模式不会由上位机调用 `enable`、`enter_servo` 或 `servo_joint`，但会创建
 TCP session；当前 lower 在 TCP 断开时会执行 `disable()`。
 
-## 6. 第二阶段：关节映射与 J1
+## 6. 第二阶段：SDK—辨识模型坐标与几何一致性审计
 
-保持电机失能。只有设备允许失能拖动时，才逐轴小角度人工移动；否则按硬件厂商的
-低风险标定流程执行。一次只动一个关节，并记录：
+本阶段不再要求操作者通过逐轴真机运动去“重新发现” SDK 已经定义的关节编号、方向和
+软件运行范围。当前 old-arm 的上位机 SDK 已经提供这些静态来源：
 
-| 关节 | SDK 字段 | 实物关节 | SDK 增大时实物方向 | 零位依据 | 实测范围 | 结论 |
-|---|---|---|---|---|---|---|
-| J1 | `joint_1` |  |  |  |  |  |
-| J2 | `joint_2` |  |  |  |  |  |
-| J3 | `joint_3` |  |  |  |  |  |
-| J4 | `joint_4` |  |  |  |  |  |
-| J5 | `joint_5` |  |  |  |  |  |
-| J6 | `joint_6` |  |  |  |  |  |
+- `config/damiao_motors.csv`：`joint_1..joint_6` 顺序、motor/feedback ID、`direction`、
+  `zero_offset_rad` 和每轴软件范围；
+- `config/safety.json`：当前部署的六轴 position/velocity/acceleration 门限；
+- `src/wlsea_arm_sdk/kinematics/model.py`：SDK joint order、J1 `[0, 2*pi]` 分支和模型转换；
+- SDK URDF：J1～J6 轴方向与运动学几何。
 
-J1 必须依据机械零位标记、标定记录或硬件负责人确认。禁止：
+因此本阶段的目标从“真机逐轴猜 mapping”改为 **静态 source-of-truth 对齐**：确认 SDK、
+辨识 runner、canonical URDF/Pinocchio 对同一个 `q` 使用一致的关节顺序、符号、零位和
+几何定义。除非发现 SDK 配置与实物不一致的明确证据，否则不要为了重复验证而搜索硬限位、
+重新设置电机零点或逐轴试动。
 
-```text
-wrap_to_pi
-q += 2*pi
-q -= 2*pi
-根据 URDF/MJCF 猜测
-为了通过门禁扩大软限位
-```
+需要特别区分两类范围：
 
-核验完成后，才在新的运行配置中填写：
+1. **SDK deployment limits**：用于上位机/下位机运动安全门禁，当前直接采用实际部署的
+   `safety.json`/motor config，不通过真机撞限位重新测量；
+2. **canonical model limits**：用于轨迹设计和动力学模型，应与最终采用的机械模型坐标一致。
 
-```yaml
-joint_direction: [<六轴 ±1>]
-joint_offset_rad: [<六轴偏置>]
-joint_position_min_rad: [<六轴实机限位>]
-joint_position_max_rad: [<六轴实机限位>]
-joint_mapping_verified: true
-j1_convention: <明确且可追溯的约定名称>
-```
+当前 SDK 自己将 deployment joint limits 标记为 `current_deployment_values_not_hardware_certified`，
+所以“直接采用 SDK 范围”表示把它作为当前软件权威运行范围，并不等于宣称获得机械硬限位认证。
+正式轨迹还必须在这些范围内保留保守 margin。
 
-同时保存日期、操作者、机械零位依据、SDK commit、`damiao_motors.csv` 和
-`safety.json` 版本。任一轴不确定时保持 `joint_mapping_verified: false`。
+### 6.1 当前静态映射结论与真正阻塞项
 
-### 6.1 当前 old-arm 的 Servo-hold-only 映射
-
-当前操作者接受以下映射仅用于当前位置保持 smoke：
+当前 SDK `damiao_motors.csv` 的六轴顺序为 `joint_1..joint_6`，六轴 `direction` 均为 `+1`；
+辨识仓库已有 Servo-hold smoke 使用：
 
 ```yaml
 joint_direction: [1, 1, 1, 1, 1, 1]
@@ -323,12 +312,206 @@ joint_mapping_verified: true
 j1_convention: PHYSICAL_MARK_PI_CENTERED_VISUAL_20260907
 ```
 
-这不是辨识级映射签字。J1 目测零位不确定性、J3/J4 人工移动串扰、J6 几何差异和
-力矩语义未解决前，`identification_ready` 必须保持 `false`。
+这里不再要求通过 J2～J6 `joint_jog` 去重新确认“哪一轴是哪一轴、正方向是什么、范围多大”。
+正式辨识前真正需要关闭的是下面两项：
 
-## 7. 第三阶段：Servo 当前位置保持
+**J1 坐标约定**：当前辨识 runner 使用 `q_ident_J1 = q_sdk_J1 - pi` 的 smoke 映射；而 SDK
+kinematics 的 `sdk_to_model_q()` 对 J1 使用 `[0, 2*pi] -> principal angle` 分支转换，并没有
+同样的 `-pi` 定义。必须选定一个唯一、可追溯的 canonical J1 零位/转换公式，并让：
 
-仅在以下条件全部满足后执行：
+```text
+SDK state -> runner q -> Pinocchio q -> trajectory q_cmd -> SDK command
+```
+
+往返一致。解决方式应以 SDK 配置、出厂/机械零位依据和模型定义审计为主，而不是再靠运动猜测。
+
+**J6 几何差异**：当前辨识 canonical URDF 的 `joint6 origin x = 0.023692 m`，SDK combined URDF
+的 `arm_joint6 origin x = 0.028008 m`，差 `0.004316 m`。正式辨识前必须通过当前机械图纸、CAD、
+官方模型来源或实物尺寸确认正确值，并统一 SDK/辨识模型；不能让参数拟合吸收这个几何错误。
+
+本阶段 PASS 条件改为：
+
+- J1～J6 joint order 静态一致；
+- joint direction 的 source-of-truth 冻结，不再通过试动重复发现；
+- deployment limits 的来源、版本和 hash 已保存；
+- J1 canonical conversion 只有一个定义，并有往返单元测试；
+- J6 几何冲突关闭；
+- 最终 mapping/model 文件及 hash 写入验收记录。
+
+在 J1/J6 未关闭前可以保留已完成的 Servo-hold smoke，但不得将 `identification_ready` 设为 true。
+
+### 6.2 `joint_jog` 工具保留，但移出 mapping 验证职责
+
+`joint_jog` 已经完成软件/Mock 入口，继续保留；但它从现在起不再负责“确认 SDK mapping”。
+它的正式用途移动到第四阶段 **R4 单关节极小幅 commissioning**：在静态 mapping/model 已冻结后，
+检查第一次真实运动的跟踪、通信、fault、回程误差和 `effort_reported` 行为。
+
+**软件与 Mock 可运行，实机 commissioning 仍 PENDING。当前 Servo-hold-only 历史 J1 约定不应
+通过简单改名来绕过 J1 canonical 审计。**
+
+每次运行只选 J1–J6 中一轴，以及一个有符号位移；其余五轴目标保持为进入 Servo
+前重新读取的位置。流程为：
+
+```text
+失能读状态，检查起点和整个往返区间及余量
+  → 使能，再读状态并复查区间与使能期间漂移
+  → 进入 Servo，当前位置静止采样
+  → 五次多项式平滑移动到 q_start + displacement
+  → 静止采样
+  → 平滑返回 q_start
+  → 静止采样，正常退出 Servo 并失能
+```
+
+位移是 runner 坐标中的 rad，遵循原有 `q = direction*q_sdk + offset`；不会 wrap、
+自动回机械零位或搜索硬限位。正向测试后，要测试负向需创建另一份配置/输出；不会
+自动扩大幅度、反复重试或自动切到下一轴。异常时不继续返回路径，执行 best-effort
+`exit_servo → stop → disable → close`；下位机 watchdog 仍是权威保护层。
+
+**先运行离线示例**（不连接机械臂）：
+
+```bash
+JOG_DIR="$PWD/data/rebot_real/$(date +%Y%m%d_%H%M%S)_jog_mock"
+mkdir -p "$JOG_DIR"
+python3 scripts/run_rebot_hardware.py \
+  --config config/rebot_joint_jog_mock.yaml \
+  --mock \
+  --output "$JOG_DIR/joint_jog.csv"
+```
+
+示例为虚构限位与理想反馈，J1 位移 `+0.2°`、每程 2 秒、三个静止段各 1 秒。
+这些数值只是验证软件用，**不是这台实机获准的参数**。Mock 瞬时跟随目标，不模拟
+负载、回差、测量噪声或动力学；Mock 完成不等于实机通过。示例配置的
+`allow_hardware: false` 和 `j1_convention: MOCK_ONLY` 会阻止直接转用真实后端。
+
+**准备实机配置与依据**：在新的运行目录中单独创建 `joint_jog.yaml`，逐项填写：
+
+| 项目 | 来源/要求 |
+|---|---|
+| SDK/主机/端口 | 当前实际部署，不使用 Mock 地址 |
+| 六轴方向、偏置、坐标约定 | 厂商调试记录、既有标定或硬件负责人确认；不能只改标志位 |
+| `joint_mapping_verified: true` | 六轴基础编号、方向、基准和范围在本次运动范围内有证据 |
+| `joint_mapping_scope: joint_jog` | 新记录明确适用于小步运动；旧配置默认是 `servo_hold_only` |
+| `j1_convention` | 本次可追溯约定；不得将旧 smoke 名称简单改名来放行 |
+| `joint_jog.authorization_reference` | 保存于运行目录的本次测试依据文件/记录号；软件不核实签字真实性 |
+| `joint_position_min/max_rad` | 已确认的实机运行范围，按同一坐标映射换算 |
+| `joint_jog.joint` | 人工编号 1–6；每次只选一轴 |
+| `joint_jog.displacement_rad` | 有符号的获准位移，与现场可用空间相符 |
+| `ramp_duration_s`、速度、加速度上限 | 厂商/硬件测试依据；程序检查五次曲线峰值及实际发送间隔 |
+| `position_margin_rad` | 包含基准误差与所需余量；不允许通过扩大软限位避开拒绝 |
+| 漂移、停稳位置/速度阈值 | 依据反馈分辨率、噪声和实机测试要求；不能直接搬 Mock 数值 |
+| `maximum_command_gap_s` | 与已核验的 Servo 通信/看门狗时序相符；超时终止，不追赶轨迹 |
+| `duration_s` | 总超时预算，必须大于 `2*ramp_duration_s + 3*settle_duration_s` |
+| `max_samples` | 必须为 `null`，避免截断返回过程 |
+
+上述“测试依据”可以由适用的厂商公开流程、当前部署参数与现场核对结果组成，不要求
+每个工程测试选值都另取一份厂商签字。必须区分厂商建议、驱动默认值、工程选值和
+本机实测结论；公开教程不能自动将 `joint_mapping_verified` 改为 true。
+
+仍须满足 §1、§5、§7 的固定/支撑、工作区、急停、状态及 Servo 保持条件，并检查
+实机速度、力矩、碰撞、通信保护条件。当前本机 `safety.json` 将限位标为未获硬件
+认证且有多个保护未启用，不能用它的存在代替这些核验。测试依据同时保存日期、
+操作者、机器人身份、零位证据、上下位机 SDK 版本，以及下位机实际加载的
+`damiao_motors_old_arm.csv`/其他电机配置和 `safety.json` 的副本与 SHA-256。
+
+这些证据已齐备后，由现场操作者使用新配置执行：
+
+```bash
+python3 scripts/run_rebot_hardware.py \
+  --config "$RUN_DIR/joint_jog.yaml" \
+  --output "$RUN_DIR/joint_jog.csv"
+```
+
+新配置需显式填写 `allow_hardware: true`、`allow_motion: true`；本节不改旧的
+`state_only.yaml` 或 `servo_hold.yaml`，不自动生成已签字的真机配置。
+
+**读取自动结果**：CSV 保留原 experiment schema；每个周期先记录发送前状态及
+`q_cmd`，随后记录一次无新命令的反馈（`command_valid=0`、`q_cmd=nan`）。因此
+CSV 行数并不等于控制周期数。metadata 的 `joint_jog_result` 保存：
+
+- `status: completed/aborted` 及失败原因，cleanup 失败也记为 aborted；
+- 各阶段 CSV 行号范围（两端包含）、起始姿态、有符号目标位移；
+- 三个静止段后半段的位置均值/标准差及快照样本数；重复底层反馈不是独立测量；
+- `measured_displacement_rad`：终点静止均值减起点均值，六轴均记录；
+- `return_error_rad`：返回静止均值减起点均值；
+- 六轴最大漂移、相对前一条命令的最大反馈偏差。
+
+停稳窗口必须满足位置误差与 SDK 速度阈值；非目标轴漂移、限位/增量超限、失效或
+过期反馈、故障、命令间隔超限及 Ctrl+C 均终止本次测试。现有“命令相对实测位置的
+单周期速度增量”门禁继续保留，若实机跟随误差导致拒绝，应分析原因，不自动放宽。
+
+`completed` 只表示本次程序序列完成且软件检查通过；结果固定标记
+`physical_mapping_verified_by_test: false` 和 `identification_ready: false`。
+实物轴/方向仍由观察或外部测量核验，J1 零位仍用机械基准；单次返回误差也不能
+直接当作纯机械回差或绝对精度。保存不同接近方向的重复记录后再评估。
+
+### 6.3 B601-DM 官方资料核对（2026-09-07）
+
+本次用户确认：设备为预装 B601-DM，之后未更换电机、重设电机零点或改装。
+[Seeed 快速入门](https://wiki.seeedstudio.com/rebot_b601_dm_getting_started/)
+说明预装套件无需重新写 motor ID 或标定零位。该信息作为出厂初始化的来源依据，
+不要求用户为了小步测试重新执行电机设零。
+
+[Seeed 单关节控制教程](https://wiki.seeedstudio.com/rebot_arm_b601_dm_pinocchio_meshcat/)
+支持先做单关节小角度响应/方向测试，举例为 5–10°，DM 推荐 POS_VEL。此处是教程
+示例，不是当前 old-arm 必须执行的幅度或已核验安全上限。当前 `joint_jog` 仍使用
+WLSEA position-only Servo；不能直接迁移 POS_VEL 参数或 MIT 增益。
+
+两套官方驱动的默认软限位也不相同（单位：度；均为各自驱动坐标）：
+
+| 关节 | LeRobot 主仓库 | Seeed LeRobot 插件 |
+|---|---:|---:|
+| J1 / shoulder_pan | [-150, 150] | [-145, 145] |
+| J2 / shoulder_lift | [-200, 1] | [-170, 0] |
+| J3 / elbow_flex | [-200, 1] | [-200, 0] |
+| J4 / wrist_flex | [-80, 90] | [-80, 90] |
+| J5 / wrist_yaw | [-90, 90] | [-90, 90] |
+| J6 / wrist_roll | [-90, 90] | [-130, 130] |
+
+来源：[LeRobot 配置，commit 3f2c29e](https://github.com/huggingface/lerobot/blob/3f2c29ef7e44b1ddccbcda3b6a63939e53639e9e/src/lerobot/robots/rebot_b601_follower/config_rebot_b601_follower.py)、
+[Seeed 配置，commit f586762](https://github.com/Seeed-Projects/lerobot-robot-seeed-b601/blob/f586762470192e36414985bafd72e50937c0b08b/lerobot_robot_seeed_b601/config_seeed_b601_dm_follower.py)。
+两者的六轴 POS_VEL 默认速度参数均为 150°/s；这不是整机认证的最高安全速度，
+且 LeRobot 主仓库该版本默认 `control_mode` 为 MIT，POS_VEL 速度字段不会限制 MIT。
+所查资料未提供能直接填入当前 WLSEA runner 的完整六轴加速度上限。
+
+不能从 URDF/MJCF 推定机械边界，也不能简单取两套范围的交集来替代坐标核验。
+当前 SDK 已配置独立的 direction、zero_offset 和 J1 [0, 2π] 分支；Seeed 插件的
+`joint_directions` 是发送 action 时的方向/比例变换，不能直接复制为本项目的
+`joint_direction`。
+
+需特别区分官网脚本的副作用：
+
+- [LeRobot 文档](https://huggingface.co/docs/lerobot/en/rebot_b601)写有每次连接重新设零；
+  但上述 commit 的 [实际代码](https://github.com/huggingface/lerobot/blob/3f2c29ef7e44b1ddccbcda3b6a63939e53639e9e/src/lerobot/robots/rebot_b601_follower/rebot_b601_follower.py)
+  按 calibration 状态决定是否校准，`calibrate()` 会调用 `set_zero_position()`，
+  `configure()` 会使能。不要把官网校准/连接脚本作为当前 SDK 的只读检查程序。
+- [Seeed POS_VEL 示例](https://github.com/Seeed-Projects/reBotArm_control_py/blob/1bcd81b22c182ec257bf04f5746e1e3d556a5f1c/example/4_pos_vel_control.py)
+  使能全部电机后，以全零目标启动控制循环；不是“等待输入前只保持当前位置”。
+  当前姿态测试继续使用已实现的从实测当前位置出发的 `joint_jog`。
+- [官方性能测试](https://github.com/Seeed-Projects/reBot-DevArm/blob/main/hardware/reBot_B601_DM/performance_testing/Performance_Testing.md)
+  标明仅针对 Damiao V4，不能将其负载/温升测试结果无条件套用到旧版本。
+
+已将六份代码按 commit 固定归档，并记录 SHA-256：
+`data/rebot_real/20260907_161101_joint_jog_real_prepare/official_sources_20260907/manifest.json`。
+本次只更新资料依据；未改电机零点、实机软限位或运动放行标志。
+
+## 7. 第三阶段：Servo 当前位置保持与 smoke 收口
+
+当前仓库已经存在真实执行记录：
+
+```text
+data/rebot_real/20260907_115104/servo_hold.csv
+data/rebot_real/20260907_115104/servo_hold.meta.yaml
+```
+
+记录中 Servo 已激活、`primary_fault_code=0`、六轴 feedback/torque valid，且发送的 `q_cmd`
+等于进入 Servo 前读取的当前位置。它已经证明当前上位机 → SDK → lower 的“当前位置保持”
+软件链可以工作。若当次现场记录同时确认 **无可见跳变、正常 cleanup、末态失能、无 fault latch**，
+则第三阶段可作为 engineering smoke 收口，不需要为了重复确认 mapping 再执行一次。
+
+注意：该 smoke 不解决 J1 canonical 零位、J6 几何、力矩标定或正式轨迹安全问题，因此不能把它
+解释成“真机辨识已就绪”。后续只在 SDK/model 定义发生变化，或 smoke 证据不完整时回到本阶段。
+
+首次执行或需要重验时，仅在以下条件全部满足后执行：
 
 - 六轴映射和 J1 约定已签字确认；
 - 急停、断电、工作区和机械限位已检查；
@@ -449,9 +632,10 @@ python3 scripts/run_rebot_hardware.py \
   --output "$RUN_DIR/servo_hold.csv"
 ```
 
-这是本手册中唯一授权的真实电机使能命令。不要重复运行来“碰运气”通过门限。若程序
-因使能后的 50 ms feedback-age 门禁退出，应确认已自动失能并停止，不得把门限改成
-110 ms 后重试。
+本节只授权“当前位置保持”这一种运动，不授权 `joint_jog`、六轴 commissioning 或 Fourier 激励。
+不要重复运行来“碰运气”通过门限。若程序因使能后的 50 ms feedback-age 门禁退出，应确认已自动
+失能并停止，不得把门限改成 110 ms 后重试。第四阶段的真实运动必须经过新的离线轨迹预览门禁后
+单独授权。
 
 执行结束后立即检查：
 
@@ -485,55 +669,159 @@ PASS 条件：
 发生异常运动时直接使用物理急停/断电。不要把 `Ctrl+C`、关闭终端或软件 `stop`
 当作急停。未通过时不得继续小幅运动或激励。
 
-## 8. 第四阶段：小幅运动与完整辨识
+## 8. 第四阶段：轨迹离线预览、commissioning 与完整辨识
 
 ### 8.1 当前停止点
 
-当前仓库没有可运行的小幅运动模式。`control_mode: excitation` 会在创建 hardware
-session 前报错：
+当前已有：
+
+- `joint_jog` 软件/Mock 入口，可作为后续 R4 单关节 commissioning 工具；
+- `rebot_trajectory_renderer`，可把已有 reBot 关节状态 CSV 离线渲染成 MP4；
+- C++ `FourierTrajectory` 和已验证的仿真 A/B 轨迹生成链。
+
+当前仍缺少的关键连接是：**把最终准备发送给真机的同一份冻结 trajectory artifact，先在离线软件中
+完整检查和可视化，再由硬件 provider 原样 replay。** `control_mode: excitation` 目前仍会在创建
+hardware session 前报：
 
 ```text
 trajectory source integration remains pending
 ```
 
-不要用 `MoveJ`、手写 Python Fourier 或仿真 `run_experiment` 绕过该限制。
+不要用 `MoveJ`、手写 Python Fourier 或另外生成一份“看起来差不多”的轨迹绕过该限制。
 
-### 8.2 继续前必须补齐
+### 8.2 强制门禁：真机轨迹必须先离线可视化
 
-1. 将 C++ `FourierTrajectory` 已接受的系数通过 replay/provider 接入真机
-   `q_target`，保留系数文件和 hash，不复制第二套 Fourier 数学；
-2. 先完成单关节、极小幅、低速运动验收，再做六轴小幅轨迹；
-3. 生成独立轨迹 A（训练）和 B（验证），分别保存配置、系数、hash 和 metadata；
-4. 实现真机专用离线预处理：时间对齐、滤波、重采样和 `qdd` 估计；
-5. 独立核验 `effort_reported` 的来源、方向、比例、单位和物理标定；
-6. 为真机 schema 增加明确的数据转换/加载配置和样本质量门禁。
-
-`effort_reported` 是 DM 反馈力矩估计，不是已独立标定的真实关节力矩。标定通过前，
-不得将其改名为 `tau_measured`，也不得宣称得到可信实机物理参数。
-
-仿真配置 `config/rebot_dm_clean_identification.yaml` 不能直接用于真机，因为：
-
-- 真机没有 `qdd_mujoco`；
-- `effort_reported` 未证明等于仿真的 `tau_effort`；
-- `saturated_sliding` 依赖 MuJoCo truth，真机没有该 oracle。
-
-### 8.3 正式辨识顺序
+任何 `joint_jog` 之外的六轴 commissioning、trajectory C、A、B，在第一次发送到真机前都必须经过：
 
 ```text
-静态采集
-  -> 单关节小幅运动
-  -> 六轴低速小幅轨迹
-  -> 独立轨迹 A
-  -> 独立轨迹 B
+accepted C++ FourierTrajectory / frozen coefficients
+        |
+        v
+single frozen trajectory artifact + SHA-256
+        |  q_ref(t), qd_ref(t), qdd_ref(t)
+        v
+offline numeric qualification
+        |  position / velocity / acceleration / jerk
+        |  start continuity / duration / rate
+        |  model/collision checks where available
+        v
+exact-command visual preview
+        |  reBot model animation / MP4
+        v
+optional MuJoCo dynamic preview
+        |  q_ref vs simulated q tracking
+        v
+preview_acceptance record
+        |  accepted artifact hash
+        v
+RebotHardwareRunner loads the SAME artifact/hash
+```
+
+这里必须区分两种预览：
+
+1. **exact-command preview（必做）**：动画直接使用将来要发送的 `q_ref(t)`，用于肉眼检查机械臂是否出现
+   大幅甩动、奇怪折叠、接近限位、明显不符合预期的姿态；
+2. **dynamic simulation preview（推荐）**：使用同一份系数/artifact 在 MuJoCo 中执行，查看控制跟踪、
+   actuator saturation/contact 等仿真现象。它可以发现动力学问题，但不能代替 exact-command preview。
+
+现有 `rebot_trajectory_renderer` 目前读取 simulation-truth CSV；下一步软件应让它直接接受统一的
+trajectory preview/replay schema，或提供由同一 C++ `FourierTrajectory` 导出的兼容 preview CSV。
+禁止在 Python 中重写 Fourier 方程来生成“预览版本”，否则预览与真机命令可能不是同一条轨迹。
+
+每次 preview 至少生成并保存：
+
+```text
+trajectory artifact / coefficients
+trajectory.sha256
+trajectory_preview.csv
+trajectory_preview_report.yaml
+trajectory_preview.mp4
+preview_acceptance.yaml
+```
+
+`trajectory_preview_report.yaml` 至少包含每轴：
+
+```text
+q_min / q_max
+qd_abs_max
+qdd_abs_max
+jerk_abs_max
+minimum_limit_margin
+start_position
+end_position
+duration
+sample_rate
+collision/precheck result（若模型可用）
+```
+
+`preview_acceptance.yaml` 至少记录：artifact SHA-256、report/MP4 路径、操作者、日期和
+`accepted_for_hardware: true/false`。硬件 runner 在 excitation 模式必须读取该 acceptance，验证 hash
+与实际加载 artifact 完全一致；hash 不一致或未接受时 fail closed。**看过 A 的视频不能授权 B，缩放或
+修改任何系数后也必须重新生成 preview 和 acceptance。**
+
+当前已经可以用下面命令观看既有仿真 A 的运动效果：
+
+```bash
+./build/rebot_trajectory_renderer \
+  --input data/rebot_dm/excitation_A.csv \
+  --output results/rebot_dm_excitation_A.mp4
+```
+
+但这个视频回放的是仿真实际 `q`，目前只能作为视觉参考，不能作为未来真机 artifact 的最终预览验收。
+
+### 8.3 第一次真实运动：`joint_jog` 作为 R4 commissioning
+
+第二阶段不再靠 `joint_jog` 发现 mapping。J1/J6 静态审计和第三阶段 Servo hold 收口后，
+`joint_jog` 才作为第一次真实位移测试：
+
+```text
+单轴极小幅
+  -> 低速度/低加速度
+  -> 正向与反向分别运行
+  -> 检查 q_cmd/q 跟踪、feedback、fault、effort、返回误差
+  -> 一轴通过后再进入下一轴
+```
+
+它仍不得自动扩大幅度、搜索限位或一次连续跑六轴。`joint_jog` 全部通过只解锁低幅 trajectory C，
+不直接解锁正式 A/B。
+
+### 8.4 六轴轨迹与完整辨识顺序
+
+继续前必须补齐：
+
+1. 将 C++ `FourierTrajectory` 已接受的系数通过统一 replay/provider 接入 preview 与真机 `q_target`；
+2. 实现 §8.2 的 exact-command CSV/数值报告/MP4/acceptance hash 门禁；
+3. `joint_jog` 完成 R4 后，先设计显著低幅的 trajectory C，并先 preview 再实机；
+4. C 通过后再冻结独立轨迹 A（training）和 B（validation），A/B 分别 preview、分别保存 hash；
+5. 实现真机专用离线预处理：时间对齐、滤波、重采样和 `qdd` 估计；
+6. 独立核验 `effort_reported` 的来源、方向、比例、单位和物理标定；
+7. 为真机 schema 增加明确的数据转换/加载配置和样本质量门禁。
+
+正式顺序调整为：
+
+```text
+静态状态/Servo hold 已收口
+  -> SDK/model 静态一致性审计
+  -> frozen trajectory artifact
+  -> 数值门禁 + MP4 可视化 + 人工 acceptance
+  -> 单关节 joint_jog commissioning
+  -> 低幅 trajectory C：preview -> real
+  -> trajectory A：preview -> real acquisition
+  -> trajectory B：preview -> independent real acquisition
   -> 真机离线预处理
-  -> 用 A 建立基础参数空间并拟合
+  -> 仅用 A 建立基础参数空间并拟合
   -> 固定 A 的缩放、基础方向和参数
   -> 只在 B 上预测力矩
   -> 检查 per-joint RMSE、max error、rank、singular values、condition
 ```
 
-第一版先建立无 ridge OLS baseline；鲁棒算法不能替代数据语义、映射、力矩标定和
-独立 B 验证。
+`effort_reported` 是 DM 反馈力矩估计，不是已独立标定的真实关节力矩。标定通过前不得将其改名为
+`tau_measured`，也不得宣称得到可信实机物理参数。仿真配置
+`config/rebot_dm_clean_identification.yaml` 也不能直接用于真机：真机没有 `qdd_mujoco`，
+`effort_reported` 未证明等于仿真的 `tau_effort`，且 `saturated_sliding` 依赖 MuJoCo truth。
+
+第一版真机辨识先建立无 ridge OLS baseline；鲁棒算法不能替代 mapping、轨迹验收、数据语义、
+力矩标定和独立 B 验证。
 
 ## 9. 故障停止表
 
@@ -839,15 +1127,25 @@ q0 = [0, -1, -1, 0, 0, -0.6]
 ```text
 accepted C++ FourierTrajectory
         |
-        +-> coefficient/replay artifact
-        |      + hash
+        +-> single coefficient/replay artifact
+        |      + SHA-256
         |      + q_ref(t)
         |      + qd_ref(t)
         |      + qdd_ref(t)
         |
+        +-> offline qualification
+        |      + q/qd/qdd/jerk envelope
+        |      + limit margin / start continuity
+        |      + collision/model precheck where available
+        |
+        +-> exact-command preview
+        |      + trajectory_preview.csv
+        |      + trajectory_preview.mp4
+        |      + preview_acceptance.yaml
+        |
         v
 reBot hardware trajectory provider
-        |
+        |  requires accepted matching SHA-256
         v
 RebotHardwareRunner
         |
@@ -855,8 +1153,9 @@ RebotHardwareRunner
 position-only ArmClient.servo_joint(q_target)
 ```
 
-不要在 Python runner 中重新实现一套 Fourier 方程。必须让仿真和真机能够证明使用的是
-同一份冻结系数/replay artifact。
+不要在 Python runner 中重新实现一套 Fourier 方程，也不要为视频单独生成第二条数学上“类似”的
+轨迹。预览、数值检查和真机发送必须共享同一份冻结 artifact；只有这样“软件里看到的动作”才是
+准备部署到真机的动作。
 
 ## 15.2 当前必须完成的软件门禁
 
@@ -864,6 +1163,10 @@ position-only ArmClient.servo_joint(q_target)
 
 - 读取冻结 trajectory artifact；
 - 校验机器人、DOF、初始位、采样率、duration、hash；
+- 在完全不创建 hardware session 的 offline 模式下导出 exact-command preview；
+- 对 preview 做 position/velocity/acceleration/jerk、limit margin、起终点连续性检查；
+- 生成可观看的 reBot MP4，并保存 `preview_acceptance.yaml`；
+- excitation 真机入口要求 acceptance 中的 artifact hash 与实际加载文件完全一致，否则 fail closed；
 - 起点必须与实机 fresh measured q 连续；
 - 每个目标做 position limit 检查；
 - 每周期做 velocity-derived delta 检查；
@@ -882,8 +1185,10 @@ excitation trajectory source integration remains pending
 
 # 16. R4～R6：从 commissioning 到冻结 A/B
 
-正式 A/B 前建议增加一条 **trajectory C / commissioning trajectory**。C 只用于调试安全、
-采样率、跟踪和预处理，不能作为最后独立 B 验证。
+正式 A/B 前增加一条 **trajectory C / commissioning trajectory**。C 只用于调试安全、
+采样率、跟踪和预处理，不能作为最后独立 B 验证。C、A、B 每一条在真机执行前都必须先通过
+§8.2 的 exact-command 数值检查、MP4 可视化和 artifact-hash acceptance；任何 coefficient/scale/
+起点修改都会使旧 acceptance 失效。
 
 ## 16.1 R4：单关节极小幅
 

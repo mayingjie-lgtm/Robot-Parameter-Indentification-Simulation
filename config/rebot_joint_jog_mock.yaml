@@ -1,0 +1,35 @@
+# OFFLINE EXAMPLE ONLY. Values are synthetic test parameters, not hardware limits.
+# Keep the historical state_only/servo_hold configs separate.
+sdk_root: ""
+host: "127.0.0.1"
+control_mode: joint_jog
+allow_hardware: false
+allow_motion: true
+joint_mapping_verified: true
+joint_mapping_scope: joint_jog
+j1_convention: MOCK_ONLY
+joint_direction: [1, 1, 1, 1, 1, 1]
+joint_offset_rad: [0, 0, 0, 0, 0, 0]
+joint_position_min_rad: [-1, -1, -1, -1, -1, -1]
+joint_position_max_rad: [1, 1, 1, 1, 1, 1]
+maximum_command_velocity_rad_s: [0.05, 0.05, 0.05, 0.05, 0.05, 0.05]
+maximum_feedback_age_ms: 50.0
+maximum_disabled_feedback_age_ms: 110.0
+control_rate_hz: 100.0
+# Overall timeout, not a request to keep repeating. One trip takes ~7 s nominally.
+duration_s: 20.0
+max_samples: null
+output_csv: data/rebot_real/joint_jog_mock.csv
+trajectory_source: single_joint_quintic_round_trip
+joint_jog:
+  joint: 1                         # Human numbering J1..J6, not CSV q0..q5.
+  displacement_rad: 0.003490658504  # +0.2 degrees in runner coordinates, MOCK ONLY.
+  ramp_duration_s: 2.0             # Each outbound/return leg.
+  settle_duration_s: 1.0           # Baseline, endpoint, returned sampling windows.
+  maximum_acceleration_rad_s2: 0.02
+  maximum_other_joint_drift_rad: 0.0002
+  settle_position_tolerance_rad: 0.0001
+  settle_velocity_tolerance_rad_s: 0.01
+  position_margin_rad: 0.01
+  maximum_command_gap_s: 0.05
+  authorization_reference: MOCK_ONLY_OFFLINE_TEST

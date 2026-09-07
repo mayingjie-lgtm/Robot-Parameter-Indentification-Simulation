@@ -50,7 +50,11 @@ def main() -> int:
         "output_csv": str(args.output) if args.output is not None else None,
     }
     config = load_hardware_config(args.config, repo_root=REPO_ROOT, overrides=overrides)
-    client_factory = MockArmClient if args.mock else None
+    client_factory = None
+    if args.mock:
+        client_factory = lambda **kwargs: MockArmClient(
+            **kwargs, follow_servo_targets=config["control_mode"] == "joint_jog"
+        )
     runner = RebotHardwareRunner(
         config,
         repo_root=REPO_ROOT,
@@ -65,6 +69,11 @@ def main() -> int:
     print(f"sample_count={metadata['observed_sample_count']}")
     print(f"csv={output}")
     print(f"metadata={output.with_suffix('.meta.yaml')}")
+    if "joint_jog_result" in metadata:
+        result = metadata["joint_jog_result"]
+        print(f"joint_jog_status={result['status']}; physical_mapping_verified_by_test=false; identification_ready=false")
+        print(f"measured_displacement_rad={result.get('measured_displacement_rad')}")
+        print(f"return_error_rad={result.get('return_error_rad')}")
     if args.mock:
         print("mock_only=true; no real hardware was contacted")
     return 0

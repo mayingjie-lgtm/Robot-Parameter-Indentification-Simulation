@@ -44,6 +44,10 @@ public UDP -> UdpStateSubscriber -> rebot_hardware_state_v1
 
 Phase 6B does not change that raw capture schema or its UDP-only semantics.
 
+2026-09-07 addition: `joint_jog` implements a bounded, single-joint quintic excursion
+and return through the same Servo adapter. It is software/Mock tested; hardware
+acceptance remains pending. It neither homes the arm nor unlocks `excitation`.
+
 ## 2. Audited SDK source of truth
 
 The external SDK was inspected read-only at:
@@ -171,6 +175,31 @@ j1_convention != UNRESOLVED
 The explicit `--mock` path is not a real hardware session and may run while
 `allow_hardware=false`; motion-like Mock lifecycle still requires `allow_motion`, verified
 mapping, and resolved J1 so that the software gates themselves are exercised.
+
+`joint_jog` additionally requires `joint_mapping_scope: joint_jog` (old configs default
+to `servo_hold_only`) and a nonempty `joint_jog.authorization_reference` identifying
+the bounded-motion test record. The historical `PHYSICAL_MARK_PI_CENTERED_VISUAL_20260907`
+hold-only convention is rejected for jog; a Mock convention is rejected on a real backend.
+These strings record operator evidence, not automatic proof of hardware certification.
+All numeric jog parameters must be explicit; `max_samples` must be null and `duration_s`
+is a timeout budget exceeding the planned round trip. Before enable, the runner checks
+disabled state and the full excursion envelope with a margin. After enable it rechecks
+the envelope and enable-time drift before claiming Servo ownership.
+
+The jog path is evaluated against actual monotonic elapsed time, with zero endpoint
+velocity/acceleration quintic ramps. Planned peak velocity/acceleration, measured-state
+command delta, consecutive-target delta, timed command velocity/acceleration, other-axis
+drift, stationary-window position/velocity and command gap are checked. A fault aborts
+without an automatic return. Jog enable/Servo intent is tracked before sending requests
+so uncertain ACK failures still attempt cleanup; KeyboardInterrupt also invokes cleanup.
+
+Jog preserves the CSV schema, recording alternating pre-command and post-command state
+rows; post-command observations have `command_valid=0` and no `q_cmd`. `joint_jog_result`
+in metadata contains completion/abort status, phase row ranges, stationary snapshot
+statistics, excursion and return error. These are encoder-space observations, not proof
+of physical joint mapping or backlash. `physical_mapping_verified_by_test` and
+`identification_ready` remain false. Existing CSV/metadata output paths are refused for jog.
+The complete operator procedure and parameter meanings are in the runbook §6.2.
 
 The upper layer implements only fail-fast checks:
 

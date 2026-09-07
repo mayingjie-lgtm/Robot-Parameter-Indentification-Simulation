@@ -167,10 +167,13 @@ feedback validity/age、Servo 状态、host/lower timestamp 与 Servo sequence�
 接上实机后的逐步检查、状态采集、关节映射和 Servo 保持操作见
 [`doc/REBOT_REAL_HARDWARE_RUNBOOK.md`](doc/REBOT_REAL_HARDWARE_RUNBOOK.md)。
 
-三个 control mode 当前状态：
+control mode 当前状态：
 
 - `state_only`：软件流程与 Mock 已实现；真实硬件验收仍 `PENDING`。
 - `servo_hold`：完整 Servo lifecycle 与 fault cleanup 已用 Mock 验证；真实执行仍被默认门禁阻断。
+- `joint_jog`：单轴平滑小步往返与自动记录已实现，真实硬件验收 PENDING。离线运行
+  `python3 scripts/run_rebot_hardware.py --config config/rebot_joint_jog_mock.yaml --mock`。
+  Mock 参数不是实机限值；旧 hold-only 映射不能放行，详见操作手册 §6.2。
 - `excitation`：门禁已定义，但可信 Fourier source 仍在现有 C++ `ForceController`；为避免复制第二套数学实现，trajectory source integration 仍 `PENDING`，当前会在创建 hardware session 前明确拒绝执行。
 
 Phase 6A 的 UDP-only raw state capture `rebot_hardware_state_v1` 保持独立且不变，见
