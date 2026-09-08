@@ -347,3 +347,9 @@ target_link_libraries(rebot_identification_model_closure
 target_compile_definitions(rebot_identification_model_closure
   PRIVATE PROJECT_ROOT_DIR="${PROJECT_ROOT_DIR}"
 )
+
+# RNEA-generated offline data for the hardware-format preprocessing/OLS tests.
+add_executable(rebot_reported_effort_fixture tests/rebot_real/reported_effort_fixture.cpp)
+target_link_libraries(rebot_reported_effort_fixture PRIVATE rebot_pinocchio_dynamics)
+target_include_directories(rebot_reported_effort_fixture PRIVATE src/identification/include)
+target_compile_definitions(rebot_reported_effort_fixture PRIVATE PROJECT_ROOT_DIR="${PROJECT_ROOT_DIR}")

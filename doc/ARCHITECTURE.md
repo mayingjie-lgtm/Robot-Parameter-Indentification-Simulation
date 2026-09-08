@@ -597,6 +597,22 @@ legacy schema 也不适合 reBot 真机辨识。当前 joint mapping hardware ve
 
 ---
 
+## reBot reported-effort 离线闭环（2026-09-08）
+
+已新增 `rebot_hardware_experiment_v1 -> Python preprocessing -> identify real_reported_effort -> A/B 报告`。
+保留 runner 坐标与 raw 数据；host receive 时间作为时轴，lower timestamp 仅用于重复反馈诊断。
+有效连续段重采样、零相位滤波后，从 SDK qd 求导生成 `qdd_est`，力矩目标为未标定的
+`effort_filtered`。A 定义全部缩放、SVD 和 OLS 参数；B 只用于独立评价。
+
+real 模式无需 MuJoCo quality columns 或 `theta_true`，附加回归列以布尔开关选择，
+不改回归器公式与原有 simulation 分支。Python 入口校验原始文件/轨迹独立性及映射一致性，
+记录模型、数据和处理设置 provenance。详见 README §6.1。
+
+这是 reported-effort prediction 首版，不是物理参数标定或实机运动放行。
+此前控制 runner 的授权范围、ACK 丢失清理和实际发送时序问题尚需另行处理。
+
+---
+
 # 8. 当前明确不做的架构工作
 
 现阶段不做：

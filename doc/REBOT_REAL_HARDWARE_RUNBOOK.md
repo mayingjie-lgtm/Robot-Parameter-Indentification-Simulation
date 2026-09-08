@@ -1,5 +1,11 @@
 # reBot 实机接入与辨识操作手册
 
+> 2026-09-08 更新：已实现 **reported-effort 首版离线 A/B 闭环**，见
+> [README §6.1](../README.md#61-rebot-实机数据的-reported-effort-辨识先跑通)。
+> 本文 R8/R9 的“已标定力矩/正式物理辨识”要求仍是后续目标；首版允许拟合未标定 SDK effort，
+> 不要求先完成精度标定。实际采集仍需处理控制授权、异常清理、时序和现场运动条件。
+
+
 > 本文同时给出 **2026-09-07 当前已可执行能力** 与 **reBot 真机系统辨识完整目标流程**。
 >
 > 当前仓库已有 `state_only`、真实 `servo_hold` 记录、单轴往返 `joint_jog`（软件/Mock 验证，实机 commissioning PENDING），以及 frozen trajectory exporter / numerical qualification / exact-command renderer / matching-hash Mock replay 软件链。真实六轴 excitation 仍受人工 preview acceptance、J1/J6、hardware replay-rate/limits、真机数据预处理和辨识级标定门禁约束，不得把软件/Mock PASS 当成真机授权。
@@ -1484,12 +1490,12 @@ abs(qd_j) >= v_min_j
 其中 `v_min_j` 应根据 C/A 的速度噪声和摩擦数据确定。仿真 `0.05 rad/s` 可作为分析参考，
 不能未经验证直接当成真机物理阈值。
 
-# 19. R9：当前 identify 程序在真机前还必须修的接口语义
+# 19. R9：real 入口现状与后续标定接口
 
 这是当前项目最关键的软件阻塞之一。
 
-现有 `./build/identify` 是围绕仿真/Piper clean 数据契约建立的，当前仍存在以下
-真机不兼容点：
+现有 `./build/identify` 的默认 simulation 模式围绕仿真/Piper clean 数据契约建立，
+以下限制仍适用于该默认模式；新增 `real_reported_effort` 分支已避免这些依赖：
 
 1. 默认需要 `time_begin/q/qd/qdd_mujoco/tau_effort`；
 2. 默认要求 `tau_constraint/saturated/contact_count` 这类仿真质量列；
@@ -1500,8 +1506,8 @@ abs(qd_j) >= v_min_j
 7. `joint_armature/joint_damping/joint_frictionloss` 在当前 reBot 路径中带有
    simulation-truth 语义，不能把仿真数值原样填进真机配置。
 
-因此正式真机辨识前应做一个 **最小 real-hardware identification mode**，而不是伪造
-`qdd_mujoco`、`tau_constraint` 等列名去欺骗现有 loader。
+reported-effort 首版已经实现最小 real 模式，且没有伪造 `qdd_mujoco`、`tau_constraint`。
+以下 `tau_calibrated` 接口保留为后续独立力矩标定完成后的升级目标。
 
 ## 19.1 真机 mode 最小要求
 
@@ -1540,7 +1546,9 @@ config/rebot_real_identification.yaml
 scripts/preprocess_rebot_hardware_identification.py
 ```
 
-**这两个名字是后续实现建议，当前仓库尚不存在，不得现在直接执行。**
+这两个文件现已实现 reported-effort 首版：`config/rebot_real_identification.yaml` 是
+Python 离线编排入口的配置，`scripts/preprocess_rebot_hardware_identification.py` 是单文件预处理工具。
+它们使用 `effort_filtered`，不声称已经得到上述 `tau_calibrated`；具体命令和限制见 README §6.1。
 
 # 20. R10：只用 A 做第一版 OLS
 
@@ -1743,7 +1751,7 @@ RMSE 变小就直接扩大运动范围。
 
 # 24. 当前项目离“可以正式辨识”还差什么
 
-截至 2026-09-07，按两个项目的实际代码和现场记录，状态为：
+截至 2026-09-08，按实际代码和已有现场记录，下面区分正式物理辨识与已实现的 reported-effort 首版：
 
 | 项目 | 状态 | 是否阻塞正式辨识 |
 |---|---|---|
@@ -1758,22 +1766,23 @@ RMSE 变小就直接扩大运动范围。
 | frozen excitation replay/provider | 软件/Mock 已实现；真机门禁未解除 | **是** |
 | 单关节/六轴 commissioning | 未执行 | **是** |
 | 真机 A/B 正式采集 | 未执行 | **是** |
-| 真机 qdd preprocessing | 未实现 | **是** |
-| 真机 identification data contract | 未实现 | **是** |
-| current identify 的 real mode | 未实现 | **是** |
+| 真机 qdd preprocessing | reported-effort 首版已实现，精度待验证 | **是** |
+| 真机 identification data contract | reported-effort 首版已实现 | 已标定力矩契约仍待升级 |
+| current identify 的 real mode | reported-effort OLS 已实现 | 否（首版） |
 | 独立 B 真机验证 | 未执行 | **是** |
 
-因此当前最高价值顺序不是直接“跑辨识”，而是：
+正式物理辨识的后续顺序如下；若先跑通 reported-effort，可将独立力矩精度标定后置，
+但仍需先完成控制问题处理和现场运动验收。
 
 ```text
 1. 关闭 J1～J6 mapping/zero + J6 geometry
 2. 完成 effort_reported 独立力矩标定
 3. 人工完成 exact-command preview acceptance，并确认 hardware replay rate/limits
 4. 单关节 -> 六轴 commissioning
-5. 实现 hardware preprocessing + real identification mode
+5. 验证已实现的 reported-effort preprocessing + real mode，后续升级 calibrated torque
 6. 冻结 A/B，正式采集
 7. A-only OLS -> B-only validation
 8. physically-consistent model reinjection
 ```
 
-完成第 1～5 项之后，项目才真正从“实机控制 smoke”进入“可做正式 reBot 系统辨识”的状态。
+reported-effort 首版已具备离线处理与 A/B 求解能力；这不等价于上述正式物理标定或实际激励已放行。

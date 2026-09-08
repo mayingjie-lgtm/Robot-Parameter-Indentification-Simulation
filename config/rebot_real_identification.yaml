@@ -1,0 +1,19 @@
+# Offline only: these paths must refer to two independently recorded excitations.
+training_raw_csv: data/rebot_real/A_run01/raw.csv
+validation_raw_csv: data/rebot_real/B_run01/raw.csv
+model_file: rebot_dm/rebot_dm.urdf
+identify_binary: build_rebot/identify
+output_directory: results/rebot_real_identification/run01
+
+# Software starting values, not physical calibration. Freeze before inspecting B.
+rank_relative_tolerance: 1.0e-6
+friction_velocity_threshold: 0.01
+enable_armature_columns: true
+enable_damping_columns: true
+enable_friction_columns: true
+preprocessing:
+  cutoff_hz: 2.0
+  filter_order: 4
+  edge_trim_s: 0.5
+  maximum_resample_rate_hz: 100.0
+  gap_periods: 3.0
