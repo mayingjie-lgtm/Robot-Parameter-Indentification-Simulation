@@ -50,17 +50,19 @@ acceptance remains pending. It neither homes the arm nor unlocks `excitation`.
 
 ## 2. Audited SDK source of truth
 
-The external SDK was inspected read-only at:
+The current external SDK was inspected read-only at:
 
 ```text
-/home/wlsea1/桌面/机械臂sdk/wlsea_arm_sdk_sim_handoff_20260826
+/home/j/j_ws/src/wlsea_rebot_b601_upper_20260904
 ```
 
 Primary source files:
 
-- `upper/python/wlsea_arm_sdk/client.py`
-- `upper/python/wlsea_arm_sdk/protocol.py`
-- `upper/python/wlsea_arm_sdk/state_store.py`
+- `src/wlsea_arm/robot.py`
+- `src/wlsea_arm_sdk/client.py`
+- `src/wlsea_arm_sdk/protocol.py`
+- `src/wlsea_arm_sdk/movej_runtime.py`
+- `src/wlsea_arm_sdk/state_store.py`
 - `lower/cpp/src/arm_controller.cpp`
 - `lower/cpp/src/lower_server.cpp`
 - `config/safety.json`
@@ -76,7 +78,9 @@ The adapter maps only public API that exists in the audited SDK:
 |---|---|---|
 | `connect()` | `ArmClient.connect()` | open UDP feedback + TCP command session |
 | `read_state()` | `ArmClient.state_store/latest_state` | read public `JointState` |
+| `configure_movej_pvt()` | `ArmClient.configure_pvt(...)` | apply the SDK `movej_runtime` PVT policy before preposition |
 | `enable()` | `ArmClient.enable()` | motor-changing command |
+| `movej_to(q)` | `ArmClient.movej(...)` | synchronous SDK-native preposition to the frozen artifact start |
 | `enter_servo()` | `ArmClient.enter_servo()` | claim lower Servo ownership |
 | `send_servo_target(q)` | `ArmClient.servo_joint(...)` | send position-only Servo target |
 | `exit_servo()` | `ArmClient.exit_servo()` | release Servo ownership |
@@ -84,7 +88,7 @@ The adapter maps only public API that exists in the audited SDK:
 | `disable()` | `ArmClient.disable()` | disable motors |
 | `close()` | `ArmClient.close()` | close upper sockets |
 
-The adapter does not call `MoveJ`, `configure_pvt`, or gripper APIs.
+`state_only` and `servo_hold` do not call MoveJ/PVT. `excitation` may call the two new adapter operations only for the preposition gate; gripper APIs remain outside this contract. Production PVT values are loaded from the configured external SDK's `wlsea_arm_sdk.movej_runtime` constants rather than copied into this repository.
 
 ## 4. Servo command semantics
 
@@ -304,6 +308,24 @@ matching-hash PASS preview report plus MP4 and `accepted_for_hardware: true` acc
 The runner performs no interpolation, resampling, smoothing, Fourier evaluation, or
 automatic correction of `q_ref`.
 
+After all artifact/preview gates have passed and a client is created, excitation uses this distinct preposition sequence:
+
+```text
+fresh disabled feedback
+  -> configure_pvt using SDK movej_runtime policy
+  -> enable
+  -> if already at artifact q_ref[0] and settled: skip MoveJ
+     else ArmClient.movej(artifact q_ref[0])
+  -> fresh feedback
+  -> verify feedback/fault/safety/limits/servo_active=false
+  -> verify q within start_position_tolerance_rad
+  -> verify |qd| <= preposition_settle_velocity_tolerance_rad_s
+  -> enter_servo
+  -> replay exactly the original frozen samples
+```
+
+MoveJ is only a preposition operation. It is not appended to the frozen artifact, is not counted as an excitation command, and is not written as identification `command_valid=true` data. Metadata records a separate `preposition` block with start/target/final state and error/settle evidence.
+
 This is software/Mock capability only. Real Fourier excitation remains prohibited until
 real-hardware mapping/geometry, replay-rate/limit certification and human preview
 acceptance are complete.
@@ -428,6 +450,12 @@ joint_offset_rad
 joint_position_min_rad
 joint_position_max_rad
 maximum_command_velocity_rad_s
+movej_max_velocity_rad_s
+movej_max_acceleration_rad_s2
+movej_max_jerk_rad_s3
+movej_timeout_s
+start_position_tolerance_rad
+preposition_settle_velocity_tolerance_rad_s
 maximum_feedback_age_ms
 maximum_disabled_feedback_age_ms
 control_rate_hz
@@ -455,6 +483,8 @@ reBot state capture implementation        = PASS
 reBot hardware control adapter offline    = PASS
 reBot hardware runner offline             = PASS
 Mock Servo lifecycle                      = PASS
+Mock SDK MoveJ preposition                = PASS
+Mock frozen 3001-sample exact replay      = PASS
 Mock fault injection                      = PASS
 
 real hardware state acceptance            = PENDING

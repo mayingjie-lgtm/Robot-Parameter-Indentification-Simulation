@@ -80,7 +80,7 @@ class RebotHardwareRunnerTest(unittest.TestCase):
             metadata = self._runner(config, fake).run()
             self.assertEqual(metadata["observed_sample_count"], 1)
             self.assertEqual(fake.calls, ["connect", "read_state", "close"])
-            forbidden = {"enable", "enter_servo", "servo_joint", "stop", "disable"}
+            forbidden = {"configure_pvt", "enable", "movej", "enter_servo", "servo_joint", "stop", "disable"}
             self.assertTrue(forbidden.isdisjoint(fake.calls))
 
     def test_real_state_only_with_explicit_hardware_gate_still_has_no_upper_motor_command(self) -> None:
@@ -91,13 +91,15 @@ class RebotHardwareRunnerTest(unittest.TestCase):
             metadata = self._runner(config, fake, mock_backend=False).run()
             self.assertEqual(metadata["backend"], "rebot_sdk")
             self.assertEqual(fake.calls, ["connect", "read_state", "close"])
-            forbidden = {"enable", "enter_servo", "servo_joint", "stop", "disable"}
+            forbidden = {"configure_pvt", "enable", "movej", "enter_servo", "servo_joint", "stop", "disable"}
             self.assertTrue(forbidden.isdisjoint(fake.calls))
 
     def test_state_only_function_has_no_motor_changing_call_site(self) -> None:
         source = inspect.getsource(RebotHardwareRunner._run_state_only)
         for forbidden in (
+            ".configure_movej_pvt(",
             ".enable(",
+            ".movej_to(",
             ".enter_servo(",
             ".send_servo_target(",
             ".stop(",

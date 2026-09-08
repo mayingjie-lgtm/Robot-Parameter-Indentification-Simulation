@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import math
 from pathlib import Path
 import sys
 import tempfile
@@ -13,6 +14,7 @@ SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from rebot_real.control_adapter import RebotControlError
 from rebot_real.mock_client import MockArmClient
 from rebot_real.runner import RebotHardwareRunner, load_hardware_config
 from rebot_real.trajectory_artifact import (
@@ -399,6 +401,9 @@ class TrajectoryArtifactTest(unittest.TestCase):
             metadata = self._run_replay(fixture, factory=lambda **_: fake)
             expected = [sample.q_ref for sample in artifact.samples]
             self.assertEqual(metadata["observed_sample_count"], len(expected))
+            self.assertEqual(metadata["preposition"]["status"], "already_at_start")
+            self.assertEqual(metadata["preposition"]["movej_command_count"], 0)
+            self.assertEqual(fake.movej_targets, [])
             self.assertEqual(len(fake.servo_targets), len(expected))
             self.assertEqual(fake.servo_targets, expected)
             with fixture.output.open("r", encoding="utf-8", newline="") as stream:
@@ -412,6 +417,175 @@ class TrajectoryArtifactTest(unittest.TestCase):
                 self.assertEqual(
                     tuple(float(row[f"q_cmd{joint}"]) for joint in range(6)),
                     q_ref,
+                )
+
+    def test_park_pose_movej_then_excitation_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = ReplayFixture(directory)
+            fixture.write_preview_evidence()
+            artifact = load_replay_artifact(fixture.artifact, fixture.metadata)
+            fake = MockArmClient(
+                position_rad=[0.0, 0.0, 0.0, 0.0, 0.0, math.pi / 2],
+                follow_movej_targets=True,
+                follow_servo_targets=True,
+            )
+            metadata = self._run_replay(fixture, factory=lambda **_: fake)
+            self.assertEqual(fake.movej_targets, [artifact.q_start])
+            self.assertEqual(metadata["preposition"]["movej_command_count"], 1)
+            self.assertEqual(metadata["preposition"]["target_q"], list(artifact.q_start))
+            self.assertEqual(metadata["preposition"]["final_q"], list(artifact.q_start))
+            self.assertEqual(metadata["preposition"]["max_position_error"], 0.0)
+            self.assertEqual(metadata["preposition"]["max_velocity_after_move"], 0.0)
+            self.assertEqual(len(fake.servo_targets), len(artifact.samples))
+
+    def test_movej_reject_blocks_all_servo_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = ReplayFixture(directory)
+            fixture.write_preview_evidence()
+            fake = MockArmClient(
+                position_rad=[0, 0, 0, 0, 0, math.pi / 2], fail_on={"movej"}
+            )
+            with self.assertRaisesRegex(RebotControlError, "movej failed"):
+                self._run_replay(fixture, factory=lambda **_: fake)
+            self.assertEqual(fake.servo_targets, [])
+
+    def test_movej_timeout_blocks_all_servo_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = ReplayFixture(directory)
+            fixture.write_preview_evidence()
+            fake = MockArmClient(
+                position_rad=[0, 0, 0, 0, 0, math.pi / 2], fail_on={"movej_timeout"}
+            )
+            with self.assertRaisesRegex(RebotControlError, "movej failed"):
+                self._run_replay(fixture, factory=lambda **_: fake)
+            self.assertEqual(fake.servo_targets, [])
+
+    def test_movej_final_position_outside_tolerance_blocks_servo(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = ReplayFixture(directory)
+            fixture.write_preview_evidence()
+            fake = MockArmClient(position_rad=[0, 0, 0, 0, 0, math.pi / 2])
+            with self.assertRaisesRegex(RebotControlError, "excitation start"):
+                self._run_replay(fixture, factory=lambda **_: fake)
+            self.assertEqual(len(fake.movej_targets), 1)
+            self.assertEqual(fake.servo_targets, [])
+
+    def test_movej_unsettled_velocity_blocks_servo(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = ReplayFixture(directory)
+            fixture.write_preview_evidence()
+            fake = MockArmClient(
+                position_rad=[0, 0, 0, 0, 0, math.pi / 2],
+                velocity_rad_s=[0.02, 0, 0, 0, 0, 0],
+                follow_movej_targets=True,
+                settle_after_movej=False,
+            )
+            with self.assertRaisesRegex(RebotControlError, "preposition settle"):
+                self._run_replay(fixture, factory=lambda **_: fake)
+            self.assertEqual(fake.servo_targets, [])
+
+    def test_movej_invalid_feedback_blocks_servo(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = ReplayFixture(directory)
+            fixture.write_preview_evidence()
+            fake = MockArmClient(
+                position_rad=[0, 0, 0, 0, 0, math.pi / 2],
+                follow_movej_targets=True,
+                after_movej_feedback_valid=[False, True, True, True, True, True],
+            )
+            with self.assertRaisesRegex(RebotControlError, "invalid joint feedback"):
+                self._run_replay(fixture, factory=lambda **_: fake)
+            self.assertEqual(fake.servo_targets, [])
+
+    def test_movej_stale_feedback_blocks_servo(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = ReplayFixture(directory)
+            fixture.write_preview_evidence()
+            fake = MockArmClient(
+                position_rad=[0, 0, 0, 0, 0, math.pi / 2],
+                follow_movej_targets=True,
+                after_movej_feedback_age_ms=[100.0] * 6,
+            )
+            with self.assertRaisesRegex(RebotControlError, "feedback stale"):
+                self._run_replay(fixture, factory=lambda **_: fake)
+            self.assertEqual(fake.servo_targets, [])
+
+    def test_movej_fault_feedback_blocks_servo(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = ReplayFixture(directory)
+            fixture.write_preview_evidence()
+            fake = MockArmClient(
+                position_rad=[0, 0, 0, 0, 0, math.pi / 2],
+                follow_movej_targets=True,
+                after_movej_primary_fault_code=500119,
+            )
+            with self.assertRaisesRegex(RebotControlError, "primary fault active"):
+                self._run_replay(fixture, factory=lambda **_: fake)
+            self.assertEqual(fake.servo_targets, [])
+
+    def test_configure_pvt_failure_blocks_movej_and_servo(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = ReplayFixture(directory)
+            fixture.write_preview_evidence()
+            fake = MockArmClient(
+                position_rad=[0, 0, 0, 0, 0, math.pi / 2], fail_on={"configure_pvt"}
+            )
+            with self.assertRaisesRegex(RebotControlError, "configure_pvt failed"):
+                self._run_replay(fixture, factory=lambda **_: fake)
+            self.assertEqual(fake.movej_targets, [])
+            self.assertEqual(fake.servo_targets, [])
+
+    def test_real_frozen_artifact_park_movej_then_exact_3001_replay(self) -> None:
+        artifact_path = REPO_ROOT / "results/rebot_trajectory_preview/trajectory_preview.csv"
+        metadata_path = REPO_ROOT / "results/rebot_trajectory_preview/trajectory_preview.meta.yaml"
+        report_path = REPO_ROOT / "results/rebot_trajectory_preview/trajectory_preview_report.yaml"
+        mp4_path = REPO_ROOT / "results/rebot_trajectory_preview/trajectory_preview.mp4"
+        artifact = load_replay_artifact(artifact_path, metadata_path)
+        self.assertEqual(len(artifact.samples), 3001)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            acceptance = root / "acceptance.yaml"
+            acceptance.write_text(
+                yaml.safe_dump({
+                    "schema_version": "rebot_trajectory_preview_acceptance_v1",
+                    "trajectory_sha256": artifact.sha256,
+                    "preview_report": str(report_path),
+                    "preview_mp4": str(mp4_path),
+                    "operator": "offline-mock-test",
+                    "review_date": "2026-09-08",
+                    "accepted_for_hardware": True,
+                }, sort_keys=False),
+                encoding="utf-8",
+            )
+            config = load_hardware_config(
+                REPO_ROOT / "config/rebot_excitation_mock.yaml", repo_root=REPO_ROOT
+            )
+            output = root / "full_replay.csv"
+            config["output_csv"] = str(output)
+            config["trajectory_preview_acceptance"] = str(acceptance)
+            fake = MockArmClient(
+                position_rad=[0.0, 0.0, 0.0, 0.0, 0.0, math.pi / 2],
+                follow_movej_targets=True,
+                follow_servo_targets=True,
+            )
+            metadata = RebotHardwareRunner(
+                config,
+                repo_root=REPO_ROOT,
+                client_factory=lambda **_: fake,
+                mock_backend=True,
+                sleep_fn=lambda _: None,
+            ).run()
+            expected = [sample.q_ref for sample in artifact.samples]
+            self.assertEqual(fake.movej_targets, [artifact.q_start])
+            self.assertEqual(metadata["preposition"]["movej_command_count"], 1)
+            self.assertEqual(len(fake.servo_targets), 3001)
+            self.assertEqual(fake.servo_targets, expected)
+            with output.open("r", encoding="utf-8", newline="") as stream:
+                rows = [row for row in csv.DictReader(stream) if row["command_valid"] == "1"]
+            self.assertEqual(len(rows), 3001)
+            for row, q_ref in zip(rows, expected):
+                self.assertEqual(
+                    tuple(float(row[f"q_cmd{joint}"]) for joint in range(6)), q_ref
                 )
 
 

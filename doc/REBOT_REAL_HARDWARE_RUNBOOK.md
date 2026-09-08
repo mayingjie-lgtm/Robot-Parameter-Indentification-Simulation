@@ -681,12 +681,14 @@ PASS 条件：
 - `rebot_trajectory_exporter`：从 C++ Fourier accepted coefficient stream 导出固定采样 replay artifact；
 - `trajectory_artifact.py` / `qualify_rebot_trajectory.py`：校验 artifact hash/provenance/fixed grid，并生成数值报告与默认 `accepted_for_hardware: false` 的 acceptance 模板；
 - `RebotHardwareRunner` excitation：仅 replay `artifact.samples[i].q_ref`，不插值、不重采样、不重算 Fourier；任何 artifact/preview gate 失败都发生在 client factory / `ArmClient` 创建前；
-- Mock excitation 可用 deterministic clock 完整 replay，不需要真实等待 30 s。
+- excitation 已增加独立的 SDK MoveJ preposition：fresh disabled feedback -> SDK PVT policy -> enable -> MoveJ 到 artifact `q_ref[0]` -> fresh feedback -> q0/settle 验证 -> Servo replay；若已经在 q0 且静止则跳过 MoveJ；
+- MoveJ target/状态只进入 metadata 的 `preposition` 证据，不进入 frozen artifact，也不算作 `command_valid=true/control_mode=excitation` 的辨识样本；
+- Mock excitation 可从 `[0, 0, 0, 0, 0, pi/2]` 近似停放姿态开始，用 deterministic clock 完整 replay，不需要真实等待 30 s。
 
-当前软件链已经接通到 **frozen artifact -> qualification -> exact-command preview gate -> matching-hash replay**。
+当前软件链已经接通到 **frozen artifact -> qualification -> exact-command preview gate -> SDK MoveJ preposition -> q0 verification -> matching-hash replay**。
 仍然禁止真实六轴 excitation，因为 J1 identification-grade convention、J6 geometry、100 Hz hardware rate certification、
-acceleration/jerk 官方限值以及人工 preview acceptance 尚未完成。不要用 `MoveJ`、手写 Python Fourier 或
-另外生成一份“看起来差不多”的轨迹绕过该门禁。
+acceleration/jerk 官方限值以及人工 preview acceptance 尚未完成。SDK MoveJ 只允许作为通过全部前置门禁后的 q0 预定位手段，
+不得用独立 MoveJ、手写 Python Fourier 或另外生成一份“看起来差不多”的轨迹代替/绕过 frozen replay 与 acceptance。
 
 ### 8.2 强制门禁：真机轨迹必须先离线可视化
 
@@ -714,6 +716,12 @@ preview_acceptance record
         |  accepted artifact hash
         v
 RebotHardwareRunner loads the SAME artifact/hash
+        |
+        v
+SDK MoveJ preposition to artifact q_ref[0]
+        |  fresh feedback + position/settle verification
+        v
+exact frozen Servo replay
 ```
 
 这里必须区分两种预览：
@@ -1155,7 +1163,8 @@ position-only ArmClient.servo_joint(q_target)
 
 不要在 Python runner 中重新实现一套 Fourier 方程，也不要为视频单独生成第二条数学上“类似”的
 轨迹。预览、数值检查和真机发送必须共享同一份冻结 artifact；只有这样“软件里看到的动作”才是
-准备部署到真机的动作。
+准备部署到真机的动作。`trajectory_preview.mp4` 只表示 **SDK MoveJ 已完成后，从 frozen q0 开始的 30 s exact-command excitation**；
+MoveJ 本身不是 identification artifact 的一部分，也不进入 identification dataset。
 
 ## 15.2 当前必须完成的软件门禁
 
@@ -1167,18 +1176,22 @@ position-only ArmClient.servo_joint(q_target)
 - 对 preview 做 position/velocity/acceleration/jerk、limit margin、起终点连续性检查；
 - 生成可观看的 reBot MP4，并保存 `preview_acceptance.yaml`；
 - excitation 真机入口要求 acceptance 中的 artifact hash 与实际加载文件完全一致，否则 fail closed；
-- 起点必须与实机 fresh measured q 连续；
-- 每个目标做 position limit 检查；
+- client 创建后先读取 fresh disabled feedback，并复用 SDK `movej_runtime` PVT policy；
+- 当前姿态若不在 frozen `q_ref[0]` 且未静止，则使用原生 `ArmClient.movej` 预定位，不重新生成轨迹；
+- MoveJ 返回后重新读取 fresh feedback，检查 feedback/fault/safety/limits/`servo_active=false`；
+- 六轴起点误差必须满足 `start_position_tolerance_rad`，且 `|qd|` 必须满足 `preposition_settle_velocity_tolerance_rad_s`；
+- 已经在 q0 且静止时跳过 no-op MoveJ；
+- 每个 frozen Servo 目标做 position limit 检查；
 - 每周期做 velocity-derived delta 检查；
 - 加入 acceleration/jerk 上位机门禁，不能只依赖 lower；
 - 记录每个发送的 `q_cmd`、command timestamp、sequence；
 - feedback stale / fault / servo ownership 立即 fail closed；
 - 正常退出和异常退出都执行明确的 Servo cleanup。
 
-上述门禁已经落到 frozen replay 路径；runner 不再用“trajectory source pending”占位错误拒绝。
+上述门禁已经落到 frozen replay 路径；runner 不再用“trajectory source pending”占位错误拒绝，并且 MoveJ preposition 与 frozen excitation 已严格分离。
 但 **软件入口可用不等于真实硬件获准**：正式 hardware config 仍保持 `allow_hardware: false`、
 `allow_motion: false`、`joint_mapping_verified: false`、`j1_convention: UNRESOLVED`。在人工 acceptance、
-J1/J6 和 hardware-rate/limit certification 完成前，不得用 MoveJ、临时脚本或手写 Fourier 绕过。
+J1/J6 和 hardware-rate/limit certification 完成前，真实 MoveJ 预定位同样不会被授权；不得用临时脚本或手写 Fourier 绕过这些门禁。
 
 # 16. R4～R6：从 commissioning 到冻结 A/B
 

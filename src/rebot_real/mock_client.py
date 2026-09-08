@@ -31,6 +31,11 @@ class MockArmClient:
         safety_state: str = "disabled",
         disconnect_after_state_reads: int | None = None,
         follow_servo_targets: bool = False,
+        follow_movej_targets: bool = False,
+        settle_after_movej: bool = True,
+        after_movej_feedback_valid: Sequence[bool] | None = None,
+        after_movej_feedback_age_ms: Sequence[float] | None = None,
+        after_movej_primary_fault_code: int | None = None,
     ) -> None:
         self.host = host
         self.tcp_port = int(tcp_port)
@@ -48,7 +53,19 @@ class MockArmClient:
         self.safety_state = str(safety_state)
         self.disconnect_after_state_reads = disconnect_after_state_reads
         self.follow_servo_targets = bool(follow_servo_targets)
+        self.follow_movej_targets = bool(follow_movej_targets)
+        self.settle_after_movej = bool(settle_after_movej)
+        self.after_movej_feedback_valid = (
+            None if after_movej_feedback_valid is None else tuple(after_movej_feedback_valid)
+        )
+        self.after_movej_feedback_age_ms = (
+            None if after_movej_feedback_age_ms is None else tuple(after_movej_feedback_age_ms)
+        )
+        self.after_movej_primary_fault_code = after_movej_primary_fault_code
         self.calls: list[str] = []
+        self.pvt_configurations: list[dict[str, tuple[float, ...]]] = []
+        self.movej_targets: list[tuple[float, ...]] = []
+        self.movej_command_records: list[dict[str, object]] = []
         self.servo_targets: list[tuple[float, ...]] = []
         self.servo_command_records: list[tuple[int, int, tuple[float, ...]]] = []
         self.connected = False
@@ -59,6 +76,14 @@ class MockArmClient:
         self._state_reads = 0
         self._request_id = 1
         self._last_servo_sequence = 0
+        self.movej_pvt_policy = {
+            "current_bandwidth_hz": (1000.0,) * JOINT_COUNT,
+            "velocity_kp": (0.01,) * JOINT_COUNT,
+            "velocity_ki": (0.001,) * JOINT_COUNT,
+            "position_kp": (100.0,) * JOINT_COUNT,
+            "position_ki": (0.0,) * JOINT_COUNT,
+            "current_limit_normalized": (0.1,) * JOINT_COUNT,
+        }
 
         for name, values in (
             ("feedback_valid", self.feedback_valid),
@@ -100,6 +125,30 @@ class MockArmClient:
             return None
         return self._make_state(time.monotonic_ns())
 
+    def configure_pvt(
+        self,
+        current_bandwidth_hz,
+        velocity_kp,
+        velocity_ki,
+        position_kp,
+        position_ki,
+        current_limit_normalized,
+        timeout_s: float = 5.0,
+    ):
+        """Record the six-axis PVT configuration used before MoveJ."""
+
+        self.calls.append("configure_pvt")
+        self._fail("configure_pvt")
+        self.pvt_configurations.append({
+            "current_bandwidth_hz": tuple(float(v) for v in current_bandwidth_hz),
+            "velocity_kp": tuple(float(v) for v in velocity_kp),
+            "velocity_ki": tuple(float(v) for v in velocity_ki),
+            "position_kp": tuple(float(v) for v in position_kp),
+            "position_ki": tuple(float(v) for v in position_ki),
+            "current_limit_normalized": tuple(float(v) for v in current_limit_normalized),
+        })
+        return self._done_reply()
+
     def enable(self, timeout_s: float = 5.0):
         """Simulate lower enable and READY transition."""
 
@@ -108,6 +157,57 @@ class MockArmClient:
         self.enabled = True
         self.robot_mode = "idle"
         self.safety_state = "ready"
+        return self._done_reply()
+
+    def movej(
+        self,
+        target_position_rad: Iterable[float],
+        max_velocity_rad_s=0.5,
+        max_acceleration_rad_s2=1.0,
+        max_jerk_rad_s3=40.0,
+        timeout_s: float = 30.0,
+        sent_callback=None,
+        accepted_callback=None,
+    ):
+        """Record an SDK-style synchronous MoveJ independently from Servo targets."""
+
+        self.calls.append("movej")
+        if "movej_timeout" in self.fail_on:
+            raise TimeoutError("mock movej timeout")
+        self._fail("movej")
+        if not self.enabled or self.servo_active:
+            raise RuntimeError("mock movej requires enabled non-Servo state")
+        target = tuple(float(value) for value in target_position_rad)
+        if len(target) != JOINT_COUNT or not all(math.isfinite(value) for value in target):
+            raise ValueError("mock MoveJ target must contain six finite values")
+        velocity = _joint_parameter(max_velocity_rad_s)
+        acceleration = _joint_parameter(max_acceleration_rad_s2)
+        jerk = _joint_parameter(max_jerk_rad_s3)
+        self.movej_targets.append(target)
+        self.movej_command_records.append({
+            "target": target,
+            "max_velocity_rad_s": velocity,
+            "max_acceleration_rad_s2": acceleration,
+            "max_jerk_rad_s3": jerk,
+            "timeout_s": float(timeout_s),
+        })
+        if sent_callback is not None:
+            sent_callback()
+        if accepted_callback is not None:
+            accepted_callback()
+        if self.follow_movej_targets:
+            self.position_rad = list(target)
+        if self.settle_after_movej:
+            self.velocity_rad_s = [0.0] * JOINT_COUNT
+        if self.after_movej_feedback_valid is not None:
+            self.feedback_valid = tuple(self.after_movej_feedback_valid)
+        if self.after_movej_feedback_age_ms is not None:
+            self.feedback_age_ms = tuple(self.after_movej_feedback_age_ms)
+        if self.after_movej_primary_fault_code is not None:
+            self.primary_fault_code = int(self.after_movej_primary_fault_code)
+        self.robot_mode = "idle"
+        self.safety_state = "ready"
+        self.servo_active = False
         return self._done_reply()
 
     def enter_servo(self, timeout_s: float = 3.0):
@@ -209,3 +309,13 @@ class MockArmClient:
     @staticmethod
     def _done_reply():
         return SimpleNamespace(status=SimpleNamespace(value="done"))
+
+
+def _joint_parameter(value) -> tuple[float, ...]:
+    if isinstance(value, (int, float)):
+        values = (float(value),) * JOINT_COUNT
+    else:
+        values = tuple(float(v) for v in value)
+    if len(values) != JOINT_COUNT or not all(math.isfinite(v) and v > 0.0 for v in values):
+        raise ValueError("mock MoveJ limits must contain six positive finite values")
+    return values

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 import sys
 import unittest
@@ -79,12 +80,63 @@ class RebotControlAdapterTest(unittest.TestCase):
             adapter.send_servo_target([0.0] * 5)
         self.assertNotIn("servo_joint", fake.calls)
 
+    def test_configure_movej_pvt_uses_sdk_policy_surface(self) -> None:
+        fake = MockArmClient()
+        adapter = self._adapter(fake)
+        adapter.connect()
+        adapter.configure_movej_pvt()
+        self.assertEqual(fake.calls, ["connect", "configure_pvt"])
+        self.assertEqual(len(fake.pvt_configurations), 1)
+        self.assertEqual(fake.pvt_configurations[0], fake.movej_pvt_policy)
+
+    def test_movej_target_uses_canonical_inverse_mapping_with_j1_minus_pi_offset(self) -> None:
+        fake = MockArmClient(follow_movej_targets=True)
+        adapter = self._adapter(
+            fake,
+            joint_direction=[1, 1, 1, 1, 1, 1],
+            joint_offset_rad=[-math.pi, 0, 0, 0, 0, 0],
+        )
+        adapter.connect()
+        adapter.enable()
+        adapter.movej_to(
+            [0.0, -1.0, -1.0, 0.0, 0.0, -0.6],
+            max_velocity_rad_s=[0.2] * 6,
+            max_acceleration_rad_s2=[0.4] * 6,
+            max_jerk_rad_s3=[5.0] * 6,
+            timeout_s=10.0,
+        )
+        self.assertEqual(len(fake.movej_targets), 1)
+        self.assertAlmostEqual(fake.movej_targets[0][0], math.pi)
+        self.assertEqual(fake.movej_targets[0][1:], (-1.0, -1.0, 0.0, 0.0, -0.6))
+        self.assertEqual(fake.servo_targets, [])
+
     def test_sdk_command_failure_is_normalized(self) -> None:
         fake = MockArmClient(fail_on={"enable"})
         adapter = self._adapter(fake)
         adapter.connect()
         with self.assertRaisesRegex(RebotControlError, "enable failed"):
             adapter.enable()
+
+    def test_configure_pvt_failure_is_normalized(self) -> None:
+        fake = MockArmClient(fail_on={"configure_pvt"})
+        adapter = self._adapter(fake)
+        adapter.connect()
+        with self.assertRaisesRegex(RebotControlError, "configure_pvt failed"):
+            adapter.configure_movej_pvt()
+
+    def test_movej_failure_is_normalized(self) -> None:
+        fake = MockArmClient(fail_on={"movej"})
+        adapter = self._adapter(fake)
+        adapter.connect()
+        adapter.enable()
+        with self.assertRaisesRegex(RebotControlError, "movej failed"):
+            adapter.movej_to(
+                [0.0] * 6,
+                max_velocity_rad_s=[0.2] * 6,
+                max_acceleration_rad_s2=[0.4] * 6,
+                max_jerk_rad_s3=[5.0] * 6,
+                timeout_s=10.0,
+            )
 
 
 if __name__ == "__main__":

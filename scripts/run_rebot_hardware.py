@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 import sys
 import time
@@ -67,10 +68,16 @@ def main() -> int:
     client_factory = None
     mock_clock = None
     if args.mock:
-        client_factory = lambda **kwargs: MockArmClient(
-            **kwargs,
-            follow_servo_targets=config["control_mode"] in {"joint_jog", "excitation"},
-        )
+        def client_factory(**kwargs):
+            excitation = config["control_mode"] == "excitation"
+            return MockArmClient(
+                **kwargs,
+                position_rad=[0.0, 0.0, 0.0, 0.0, 0.0, math.pi / 2]
+                if excitation
+                else None,
+                follow_movej_targets=excitation,
+                follow_servo_targets=config["control_mode"] in {"joint_jog", "excitation"},
+            )
         if config["control_mode"] == "excitation":
             mock_clock = DeterministicMockClock()
     runner = RebotHardwareRunner(
@@ -94,6 +101,14 @@ def main() -> int:
         print(f"joint_jog_status={result['status']}; physical_mapping_verified_by_test=false; identification_ready=false")
         print(f"measured_displacement_rad={result.get('measured_displacement_rad')}")
         print(f"return_error_rad={result.get('return_error_rad')}")
+    if "preposition" in metadata:
+        preposition = metadata["preposition"]
+        print(f"preposition_status={preposition['status']}")
+        print(f"movej_command_count={preposition['movej_command_count']}")
+        print(f"movej_target={preposition['target_q']}")
+        print(f"movej_final_q={preposition['final_q']}")
+        print(f"movej_max_position_error={preposition['max_position_error']}")
+        print(f"movej_max_velocity_after_move={preposition['max_velocity_after_move']}")
     if args.mock:
         print("mock_only=true; no real hardware was contacted")
     return 0

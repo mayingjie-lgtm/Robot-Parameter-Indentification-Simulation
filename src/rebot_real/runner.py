@@ -54,7 +54,18 @@ def load_hardware_config(
         "maximum_command_velocity_rad_s": [0.05] * JOINT_COUNT,
         "maximum_command_acceleration_rad_s2": [2.0] * JOINT_COUNT,
         "maximum_command_jerk_rad_s3": [10.0] * JOINT_COUNT,
+        # Snapshot of the external SDK's current high-level MoveJ runtime policy.
+        # These bounds are only for preposition; excitation limits remain separate.
+        "movej_max_velocity_rad_s": [
+            math.radians(value) for value in (18.0, 16.0, 15.0, 18.0, 15.0, 15.0)
+        ],
+        "movej_max_acceleration_rad_s2": [
+            math.radians(value) for value in (39.99, 31.99, 39.99, 47.99, 47.99, 59.99)
+        ],
+        "movej_max_jerk_rad_s3": [math.radians(600.0)] * JOINT_COUNT,
+        "movej_timeout_s": 60.0,
         "start_position_tolerance_rad": 0.01,
+        "preposition_settle_velocity_tolerance_rad_s": 0.01,
         "maximum_feedback_age_ms": 50.0,
         "maximum_disabled_feedback_age_ms": None,
         "connect_timeout_s": 3.0,
@@ -107,6 +118,9 @@ def load_hardware_config(
         "maximum_command_velocity_rad_s",
         "maximum_command_acceleration_rad_s2",
         "maximum_command_jerk_rad_s3",
+        "movej_max_velocity_rad_s",
+        "movej_max_acceleration_rad_s2",
+        "movej_max_jerk_rad_s3",
     ):
         config[name] = list(_six_finite(config[name], name))
     for lower, upper in zip(config["joint_position_min_rad"], config["joint_position_max_rad"]):
@@ -116,12 +130,20 @@ def load_hardware_config(
         "maximum_command_velocity_rad_s",
         "maximum_command_acceleration_rad_s2",
         "maximum_command_jerk_rad_s3",
+        "movej_max_velocity_rad_s",
+        "movej_max_acceleration_rad_s2",
+        "movej_max_jerk_rad_s3",
     ):
         if any(value <= 0.0 for value in config[name]):
             raise ValueError(f"{name} values must be positive")
+    config["movej_timeout_s"] = _positive(config["movej_timeout_s"], "movej_timeout_s")
     config["start_position_tolerance_rad"] = _positive(
         config["start_position_tolerance_rad"],
         "start_position_tolerance_rad",
+    )
+    config["preposition_settle_velocity_tolerance_rad_s"] = _positive(
+        config["preposition_settle_velocity_tolerance_rad_s"],
+        "preposition_settle_velocity_tolerance_rad_s",
     )
     for name in ("maximum_feedback_age_ms", "connect_timeout_s", "command_timeout_s", "state_timeout_s"):
         config[name] = _positive(config[name], name)
@@ -483,13 +505,55 @@ class RebotHardwareRunner:
         )
         if initial.robot_mode != "disabled" or initial.safety_state != "disabled":
             raise RebotControlError("excitation requires an initially disabled robot")
-        self._validate_excitation_start(initial.q, artifact.q_start)
-
+        # ArmClient is the lower-level API used by this project. Match the SDK's
+        # high-level Robot.enable() policy by applying its existing MoveJ PVT
+        # constants while the robot is still disabled; do not duplicate them here.
+        adapter.configure_movej_pvt()
         adapter.enable()
         session["enabled"] = True
         ready = adapter.read_state()
         self._validate_state(ready, require_servo_active=False)
-        self._validate_excitation_start(ready.q, artifact.q_start)
+
+        preposition_start = tuple(ready.q)
+        movej_sent = False
+        if self._excitation_at_start_and_settled(ready, artifact.q_start):
+            final = ready
+            preposition_status = "already_at_start"
+        else:
+            # A MoveJ timeout/reject can be ambiguous after dispatch. Mark this as
+            # a motion lifecycle before the synchronous call so error cleanup sends stop.
+            session["motion_lifecycle"] = True
+            adapter.movej_to(
+                artifact.q_start,
+                max_velocity_rad_s=self.config["movej_max_velocity_rad_s"],
+                max_acceleration_rad_s2=self.config["movej_max_acceleration_rad_s2"],
+                max_jerk_rad_s3=self.config["movej_max_jerk_rad_s3"],
+                timeout_s=self.config["movej_timeout_s"],
+            )
+            movej_sent = True
+            final = adapter.read_state()
+            self._validate_state(final, require_servo_active=False)
+            preposition_status = "completed"
+
+        if final.robot_mode != "idle":
+            raise RebotControlError(
+                f"preposition final robot_mode={final.robot_mode}; expected idle before Servo"
+            )
+        self._validate_excitation_start(final.q, artifact.q_start)
+        self._validate_preposition_settle(final.qd)
+        recorder.preposition_result = {
+            "method": "sdk_movej",
+            "start_q": list(preposition_start),
+            "target_q": list(artifact.q_start),
+            "status": preposition_status,
+            "movej_command_count": int(movej_sent),
+            "final_q": list(final.q),
+            "max_position_error": max(
+                abs(actual - expected)
+                for actual, expected in zip(final.q, artifact.q_start)
+            ),
+            "max_velocity_after_move": max(abs(value) for value in final.qd),
+        }
 
         adapter.enter_servo()
         session["servo"] = True
@@ -523,6 +587,30 @@ class RebotHardwareRunner:
 
         adapter.exit_servo()
         session["servo"] = False
+
+    def _excitation_at_start_and_settled(
+        self,
+        state: CaptureSample,
+        q_start: Sequence[float],
+    ) -> bool:
+        start = _six_finite(q_start, "artifact q_start")
+        position_tolerance = float(self.config["start_position_tolerance_rad"])
+        velocity_tolerance = float(
+            self.config["preposition_settle_velocity_tolerance_rad_s"]
+        )
+        return all(
+            abs(actual - expected) <= position_tolerance
+            for actual, expected in zip(state.q, start)
+        ) and all(abs(value) <= velocity_tolerance for value in state.qd)
+
+    def _validate_preposition_settle(self, measured_qd: Sequence[float]) -> None:
+        velocity = _six_finite(measured_qd, "preposition measured_qd")
+        tolerance = float(self.config["preposition_settle_velocity_tolerance_rad_s"])
+        for index, value in enumerate(velocity):
+            if abs(value) > tolerance:
+                raise RebotControlError(
+                    f"preposition settle J{index + 1} velocity exceeds {tolerance} rad/s"
+                )
 
     def _validate_excitation_start(
         self,

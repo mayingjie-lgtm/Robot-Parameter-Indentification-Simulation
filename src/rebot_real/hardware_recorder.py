@@ -56,6 +56,7 @@ class HardwareExperimentRecorder:
         self.backend = str(backend)
         self.sample_count = 0
         self.run_result: dict[str, Any] | None = None
+        self.preposition_result: dict[str, Any] | None = None
         self.csv_path.parent.mkdir(parents=True, exist_ok=True)
         self._stream = self.csv_path.open("w", encoding="utf-8", newline="")
         self._writer = csv.DictWriter(self._stream, fieldnames=CSV_COLUMNS)
@@ -120,6 +121,8 @@ class HardwareExperimentRecorder:
                 metadata["joint_jog_result"] = self.run_result
                 metadata["joint_jog_config"] = self.config["joint_jog"]
                 metadata["joint_mapping_scope"] = self.config["joint_mapping_scope"]
+            if self.preposition_result is not None:
+                metadata["preposition"] = self.preposition_result
             self.metadata_path.write_text(
                 yaml.safe_dump(metadata, sort_keys=False, allow_unicode=True),
                 encoding="utf-8",
@@ -165,6 +168,14 @@ def build_hardware_metadata(
         "joint_position_min_rad": list(config["joint_position_min_rad"]),
         "joint_position_max_rad": list(config["joint_position_max_rad"]),
         "maximum_command_velocity_rad_s": list(config["maximum_command_velocity_rad_s"]),
+        "movej_max_velocity_rad_s": list(config["movej_max_velocity_rad_s"]),
+        "movej_max_acceleration_rad_s2": list(config["movej_max_acceleration_rad_s2"]),
+        "movej_max_jerk_rad_s3": list(config["movej_max_jerk_rad_s3"]),
+        "movej_timeout_s": float(config["movej_timeout_s"]),
+        "start_position_tolerance_rad": float(config["start_position_tolerance_rad"]),
+        "preposition_settle_velocity_tolerance_rad_s": float(
+            config["preposition_settle_velocity_tolerance_rad_s"]
+        ),
         "maximum_feedback_age_ms": float(config["maximum_feedback_age_ms"]),
         "maximum_disabled_feedback_age_ms": float(
             config["maximum_disabled_feedback_age_ms"]
@@ -219,6 +230,9 @@ def build_hardware_metadata(
             "enabled_feedback_age_limit_ms": float(config["maximum_feedback_age_ms"]),
             "primary_fault_gate": True,
             "servo_state_gate": True,
+            "preposition_fresh_feedback_gate": True,
+            "preposition_start_position_gate": True,
+            "preposition_settle_velocity_gate": True,
             "communication_timeout_s": float(config["state_timeout_s"]),
         },
         "sdk_safety_config_snapshot": safety_snapshot,

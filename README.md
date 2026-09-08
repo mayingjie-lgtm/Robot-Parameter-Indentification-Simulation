@@ -179,7 +179,7 @@ control mode 当前状态：
 - `joint_jog`：单轴平滑小步往返与自动记录已实现，真实硬件验收 PENDING。离线运行
   `python3 scripts/run_rebot_hardware.py --config config/rebot_joint_jog_mock.yaml --mock`。
   Mock 参数不是实机限值；旧 hold-only 映射不能放行，详见操作手册 §6.2。
-- `excitation`：已接入 frozen replay artifact。轨迹仍由 C++ `FourierTrajectory` 生成/冻结，Python runner 不重写 Fourier；在创建任何 client/session 前强制校验 artifact/metadata/provenance、固定采样网格、运行时 q/qd/qdd/jerk 限值以及 matching-hash preview acceptance。Mock 可使用 `config/rebot_excitation_mock.yaml`，该配置明确为 mock-only 且 `allow_hardware: false`。真实 excitation 仍因 J1/J6、100 Hz certification 和人工 preview acceptance 等门禁而禁止。
+- `excitation`：已接入 frozen replay artifact。轨迹仍由 C++ `FourierTrajectory` 生成/冻结，Python runner 不重写 Fourier；在创建任何 client/session 前强制校验 artifact/metadata/provenance、固定采样网格、运行时 q/qd/qdd/jerk 限值以及 matching-hash preview acceptance。通过这些门禁后，runner 先复用外部 SDK `movej_runtime` 的 PVT policy，并用原生 `ArmClient.movej` 从当前姿态预定位到 frozen `q_ref[0]`；MoveJ 返回后必须重新读取 fresh feedback，验证起点误差和 settle velocity，再进入 Servo。若已经在 q0 且静止则不发送 no-op MoveJ。MoveJ 不属于 frozen artifact，也不计入 `command_valid=true/control_mode=excitation` 的辨识数据；正式 30 s `trajectory_preview.mp4` 的含义仍是“MoveJ 已完成后，从 q0 开始的 exact-command excitation”。Mock 可使用 `config/rebot_excitation_mock.yaml`，该配置明确为 mock-only 且 `allow_hardware: false`。真实 excitation 仍因 J1/J6、100 Hz certification、official acceleration/jerk limits 和人工 preview acceptance 等门禁而禁止。
 
 Phase 6A 的 UDP-only raw state capture `rebot_hardware_state_v1` 保持独立且不变，见
 [`doc/REBOT_HARDWARE_DATA_CONTRACT.md`](doc/REBOT_HARDWARE_DATA_CONTRACT.md)。特别注意：当前

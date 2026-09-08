@@ -109,10 +109,72 @@ class RebotControlAdapter:
         detail = f": {last_error}" if last_error is not None else ""
         raise RebotControlError(f"state timeout after {self.state_timeout_s:.3f}s{detail}")
 
+    def configure_movej_pvt(self) -> None:
+        """Apply the SDK's existing six-axis MoveJ PVT policy before enable."""
+
+        client = self._require_client()
+        try:
+            policy = getattr(client, "movej_pvt_policy", None)
+            if policy is None:
+                policy = _load_movej_pvt_policy(self.sdk_root)
+            reply = client.configure_pvt(
+                current_bandwidth_hz=_six_finite(
+                    policy["current_bandwidth_hz"], "PVT current_bandwidth_hz"
+                ),
+                velocity_kp=_six_finite(policy["velocity_kp"], "PVT velocity_kp"),
+                velocity_ki=_six_finite(policy["velocity_ki"], "PVT velocity_ki"),
+                position_kp=_six_finite(policy["position_kp"], "PVT position_kp"),
+                position_ki=_six_finite(policy["position_ki"], "PVT position_ki"),
+                current_limit_normalized=_six_finite(
+                    policy["current_limit_normalized"], "PVT current_limit_normalized"
+                ),
+                timeout_s=self.command_timeout_s,
+            )
+        except Exception as exc:
+            raise RebotControlError(f"configure_pvt failed: {exc}") from exc
+        status = getattr(getattr(reply, "status", None), "value", getattr(reply, "status", None))
+        if status not in (None, "done"):
+            raise RebotControlError(f"configure_pvt returned unexpected status {status!r}")
+
     def enable(self) -> None:
         """Enable the lower driver through the SDK command/reply path."""
 
         self._call_reply("enable", timeout_s=self.command_timeout_s)
+
+    def movej_to(
+        self,
+        q_target: Sequence[float],
+        *,
+        max_velocity_rad_s: Sequence[float],
+        max_acceleration_rad_s2: Sequence[float],
+        max_jerk_rad_s3: Sequence[float],
+        timeout_s: float,
+    ) -> None:
+        """Synchronously preposition to one canonical target via SDK ``ArmClient.movej``."""
+
+        client = self._require_client()
+        q_public = _six_finite(q_target, "q_target")
+        velocity = _six_positive(max_velocity_rad_s, "max_velocity_rad_s")
+        acceleration = _six_positive(max_acceleration_rad_s2, "max_acceleration_rad_s2")
+        jerk = _six_positive(max_jerk_rad_s3, "max_jerk_rad_s3")
+        move_timeout = _positive_finite(timeout_s, "movej timeout_s")
+        q_sdk = tuple(
+            (q_public[index] - self.joint_offset_rad[index]) / self.joint_direction[index]
+            for index in range(JOINT_COUNT)
+        )
+        try:
+            reply = client.movej(
+                q_sdk,
+                max_velocity_rad_s=velocity,
+                max_acceleration_rad_s2=acceleration,
+                max_jerk_rad_s3=jerk,
+                timeout_s=move_timeout,
+            )
+        except Exception as exc:
+            raise RebotControlError(f"movej failed: {exc}") from exc
+        status = getattr(getattr(reply, "status", None), "value", getattr(reply, "status", None))
+        if status not in (None, "done"):
+            raise RebotControlError(f"movej returned unexpected status {status!r}")
 
     def enter_servo(self) -> None:
         """Claim lower Servo ownership and reset the explicit local sequence."""
@@ -283,6 +345,57 @@ def _load_arm_client_class(sdk_root: Path) -> Callable[..., Any]:
     return getattr(module, "ArmClient")
 
 
+def _load_movej_pvt_policy(sdk_root: Path) -> dict[str, tuple[float, ...]]:
+    """Load the authoritative PVT constants from this SDK checkout at runtime."""
+
+    if not str(sdk_root):
+        raise FileNotFoundError("sdk_root is empty; cannot load SDK MoveJ PVT policy")
+    sdk_root_path = sdk_root.expanduser().resolve()
+    python_roots = (sdk_root_path / "upper" / "python", sdk_root_path / "src")
+    module_path = next(
+        (
+            root / "wlsea_arm_sdk" / "movej_runtime.py"
+            for root in python_roots
+            if (root / "wlsea_arm_sdk" / "movej_runtime.py").is_file()
+        ),
+        None,
+    )
+    if module_path is None:
+        raise FileNotFoundError("SDK wlsea_arm_sdk/movej_runtime.py was not found")
+    python_root = module_path.parent.parent
+    existing = sys.modules.get("wlsea_arm_sdk.movej_runtime")
+    if existing is not None:
+        existing_path = Path(getattr(existing, "__file__", "")).resolve()
+        if existing_path != module_path.resolve():
+            raise RuntimeError(
+                "wlsea_arm_sdk.movej_runtime is already imported from a different SDK root: "
+                f"{existing_path}"
+            )
+    inserted = str(python_root) not in sys.path
+    if inserted:
+        sys.path.insert(0, str(python_root))
+    try:
+        module = importlib.import_module("wlsea_arm_sdk.movej_runtime")
+    finally:
+        if inserted:
+            try:
+                sys.path.remove(str(python_root))
+            except ValueError:
+                pass
+    return {
+        "current_bandwidth_hz": _six_finite(
+            module.PVT_CURRENT_BANDWIDTH_HZ, "SDK PVT_CURRENT_BANDWIDTH_HZ"
+        ),
+        "velocity_kp": _six_finite(module.PVT_VELOCITY_KP, "SDK PVT_VELOCITY_KP"),
+        "velocity_ki": _six_finite(module.PVT_VELOCITY_KI, "SDK PVT_VELOCITY_KI"),
+        "position_kp": _six_finite(module.PVT_POSITION_KP, "SDK PVT_POSITION_KP"),
+        "position_ki": _six_finite(module.PVT_POSITION_KI, "SDK PVT_POSITION_KI"),
+        "current_limit_normalized": _six_finite(
+            module.PVT_CURRENT_LIMIT_NORMALIZED, "SDK PVT_CURRENT_LIMIT_NORMALIZED"
+        ),
+    }
+
+
 def _state_snapshot(client: Any) -> tuple[Any, int, int | None] | None:
     """Read the SDK StateStore timestamp when available, with a safe compatibility fallback."""
 
@@ -305,6 +418,13 @@ def _six_finite(values: Sequence[float], name: str) -> tuple[float, ...]:
         raise ValueError(f"{name} must contain exactly {JOINT_COUNT} values")
     if not all(math.isfinite(value) for value in parsed):
         raise ValueError(f"{name} must contain only finite values")
+    return parsed
+
+
+def _six_positive(values: Sequence[float], name: str) -> tuple[float, ...]:
+    parsed = _six_finite(values, name)
+    if any(value <= 0.0 for value in parsed):
+        raise ValueError(f"{name} values must be positive")
     return parsed
 
 
