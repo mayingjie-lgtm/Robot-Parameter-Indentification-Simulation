@@ -350,14 +350,17 @@ class RebotHardwareRunnerTest(unittest.TestCase):
             self.assertNotIn("servo_joint", fake.calls)
             self.assertEqual(fake.calls[-4:], ["exit_servo", "stop", "disable", "close"])
 
-    def test_excitation_is_explicitly_deferred_before_connect(self) -> None:
+    def test_excitation_rejects_non_frozen_source_before_connect(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config = self._config(directory, mode="excitation")
             config["allow_motion"] = True
             config["joint_mapping_verified"] = True
-            config["j1_convention"] = "CANONICAL_VERIFIED"
+            config["j1_convention"] = "MOCK_CANONICAL_REBOT_DM"
             fake = MockArmClient()
-            with self.assertRaisesRegex(RuntimeError, "trajectory source integration remains pending"):
+            with self.assertRaisesRegex(
+                ValueError,
+                "trajectory_source=frozen_replay_artifact",
+            ):
                 self._runner(config, fake).run()
             self.assertEqual(fake.calls, [])
 

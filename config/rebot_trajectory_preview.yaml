@@ -1,0 +1,25 @@
+# Offline numerical qualification for the accepted reBot-DM Phase 5B A trajectory.
+# These are software qualification bounds, not certified real-hardware limits.
+# The 100 Hz rate is a candidate replay rate and remains subject to hardware commissioning.
+expected_sample_rate_hz: 100.0
+sample_rate_tolerance_hz: 1.0e-8
+expected_duration_s: 30.0
+duration_tolerance_s: 1.0e-9
+expected_start_position_rad: [0.0, -1.0, -1.0, 0.0, 0.0, -0.6]
+start_position_tolerance_rad: 1.0e-9
+start_velocity_tolerance_rad_s: 1.0e-9
+start_acceleration_tolerance_rad_s2: 1.0e-9
+require_end_matches_start: true
+endpoint_position_tolerance_rad: 1.0e-8
+endpoint_velocity_tolerance_rad_s: 1.0e-8
+endpoint_acceleration_tolerance_rad_s2: 1.0e-8
+
+# Canonical reBot-DM model limits used by the accepted simulation trajectory.
+joint_position_min_rad: [-2.8, -3.14, -3.14, -1.87, -1.57, -3.14]
+joint_position_max_rad: [2.8, 0.0, 0.0, 1.57, 1.57, 3.14]
+maximum_command_velocity_rad_s: [1.0, 1.0, 1.0, 1.5, 1.5, 1.5]
+
+# Explicit offline preview gates. They are deliberately separate from the current
+# real-hardware runner defaults and must be re-qualified before hardware use.
+maximum_command_acceleration_rad_s2: [2.0, 2.0, 2.0, 3.0, 3.0, 3.0]
+maximum_command_jerk_rad_s3: [10.0, 10.0, 10.0, 15.0, 15.0, 15.0]

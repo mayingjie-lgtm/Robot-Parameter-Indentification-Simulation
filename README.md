@@ -128,6 +128,11 @@ simulation-truth CSV，以固定相机离线生成 MP4，而不重新执行仿�
 已有输出默认不会被覆盖；确认替换时显式添加 `--overwrite`。该工具需要可用的
 GLFW 显示环境以及 PATH 中的 `ffmpeg`，目前只构建 Linux target。
 
+对于未来准备发送到 reBot Servo 的冻结轨迹，renderer 还支持
+`time/q_ref/qd_ref/qdd_ref` replay schema。该模式直接按冻结 `q_ref` 做 zero-order hold，
+通过 `mj_forward()` 可视化关节姿态，不执行 `mj_step()`，stdout 会明确输出
+`preview_mode=exact_command_zero_order_hold`。这与上面的 simulation actual-q 动态回放不同。
+
 ### 6. reBot 真机离线接入（当前只完成软件/Mock 验收）
 
 reBot-DM 当前**没有**接入 C++ `ExperimentBackend`。真实 SDK 的 Servo command 经审计只有：
@@ -174,7 +179,7 @@ control mode 当前状态：
 - `joint_jog`：单轴平滑小步往返与自动记录已实现，真实硬件验收 PENDING。离线运行
   `python3 scripts/run_rebot_hardware.py --config config/rebot_joint_jog_mock.yaml --mock`。
   Mock 参数不是实机限值；旧 hold-only 映射不能放行，详见操作手册 §6.2。
-- `excitation`：门禁已定义，但可信 Fourier source 仍在现有 C++ `ForceController`；为避免复制第二套数学实现，trajectory source integration 仍 `PENDING`，当前会在创建 hardware session 前明确拒绝执行。
+- `excitation`：已接入 frozen replay artifact。轨迹仍由 C++ `FourierTrajectory` 生成/冻结，Python runner 不重写 Fourier；在创建任何 client/session 前强制校验 artifact/metadata/provenance、固定采样网格、运行时 q/qd/qdd/jerk 限值以及 matching-hash preview acceptance。Mock 可使用 `config/rebot_excitation_mock.yaml`，该配置明确为 mock-only 且 `allow_hardware: false`。真实 excitation 仍因 J1/J6、100 Hz certification 和人工 preview acceptance 等门禁而禁止。
 
 Phase 6A 的 UDP-only raw state capture `rebot_hardware_state_v1` 保持独立且不变，见
 [`doc/REBOT_HARDWARE_DATA_CONTRACT.md`](doc/REBOT_HARDWARE_DATA_CONTRACT.md)。特别注意：当前

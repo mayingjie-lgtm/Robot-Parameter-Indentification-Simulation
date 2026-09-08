@@ -29,7 +29,7 @@ RebotHardwareRunner
   +---------+---------+
   |         |         |
 state_only servo_hold excitation
-                      (trajectory source pending)
+                      (frozen replay artifact)
             |
             v
 rebot_hardware_experiment_v1 CSV
@@ -291,19 +291,22 @@ Real Servo hold remains `PENDING` and is denied by the default configuration.
 
 ### `excitation`
 
-The mode and authorization boundary exist, but trajectory source integration is explicitly
-pending.
+The trusted reBot Fourier source of truth remains the existing C++ `ForceController` /
+`trajectory::FourierTrajectory`; the Python hardware path does not copy that mathematics.
+`rebot_trajectory_exporter` freezes the accepted C++ trajectory into the
+`rebot_replay_trajectory_v1` CSV/metadata artifact, and the runner replays each stored
+`q_ref` sample exactly once.
 
-The trusted reBot Fourier source of truth is the existing C++ `ForceController` /
-`trajectory::FourierTrajectory`. Phase 6B does not copy that mathematics into a second
-Python implementation. Until a small semantics-preserving replay/provider interface is
-available, `excitation` fails before a hardware session is created with:
+Before any `RebotControlAdapter`, client factory, `ArmClient`, or connection is created,
+`excitation` validates the artifact SHA/schema/provenance, controller/collision precheck
+status, fixed sample grid, q/qd/qdd/jerk runtime limits, control-rate equality, and a
+matching-hash PASS preview report plus MP4 and `accepted_for_hardware: true` acceptance.
+The runner performs no interpolation, resampling, smoothing, Fourier evaluation, or
+automatic correction of `q_ref`.
 
-```text
-trajectory source integration remains pending
-```
-
-Real Fourier excitation is `NOT STARTED`.
+This is software/Mock capability only. Real Fourier excitation remains prohibited until
+real-hardware mapping/geometry, replay-rate/limit certification and human preview
+acceptance are complete.
 
 ## 9. Hardware experiment CSV
 

@@ -194,7 +194,7 @@ Eigen::MatrixXd mujocoMassMatrix(const mjModel *model, mjData *data,
   setMujocoState(model, data, mapping, state);
   mj_forward(model, data);
   std::vector<mjtNum> dense(static_cast<std::size_t>(model->nv * model->nv), 0.0);
-  mj_fullM(model, data, dense.data());
+  mj_fullM(model, dense.data(), data->qM);
   Eigen::MatrixXd mass(kDof, kDof);
   for (std::size_t row = 0; row < kDof; ++row) {
     for (std::size_t column = 0; column < kDof; ++column) {

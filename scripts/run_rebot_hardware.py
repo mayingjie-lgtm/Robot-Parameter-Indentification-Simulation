@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import sys
+import time
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +14,19 @@ if str(SRC_ROOT) not in sys.path:
 
 from rebot_real.mock_client import MockArmClient
 from rebot_real.runner import RebotHardwareRunner, load_hardware_config
+
+
+class DeterministicMockClock:
+    """Advance Mock excitation time without wall-clock sleeping."""
+
+    def __init__(self) -> None:
+        self.now_s = 0.0
+
+    def monotonic(self) -> float:
+        return self.now_s
+
+    def sleep(self, duration_s: float) -> None:
+        self.now_s += float(duration_s)
 
 
 def parse_args() -> argparse.Namespace:
@@ -51,15 +65,21 @@ def main() -> int:
     }
     config = load_hardware_config(args.config, repo_root=REPO_ROOT, overrides=overrides)
     client_factory = None
+    mock_clock = None
     if args.mock:
         client_factory = lambda **kwargs: MockArmClient(
-            **kwargs, follow_servo_targets=config["control_mode"] == "joint_jog"
+            **kwargs,
+            follow_servo_targets=config["control_mode"] in {"joint_jog", "excitation"},
         )
+        if config["control_mode"] == "excitation":
+            mock_clock = DeterministicMockClock()
     runner = RebotHardwareRunner(
         config,
         repo_root=REPO_ROOT,
         client_factory=client_factory,
         mock_backend=args.mock,
+        sleep_fn=mock_clock.sleep if mock_clock is not None else time.sleep,
+        monotonic_fn=mock_clock.monotonic if mock_clock is not None else time.monotonic,
     )
     metadata = runner.run()
     output = Path(config["output_csv"])

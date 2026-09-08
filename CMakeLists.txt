@@ -154,6 +154,33 @@ target_compile_definitions(run_experiment
   PRIVATE PROJECT_GIT_COMMIT="${PROJECT_GIT_COMMIT}"
 )
 
+add_executable(rebot_trajectory_exporter
+  src/app/rebot_trajectory_exporter.cpp
+)
+target_link_libraries(rebot_trajectory_exporter
+  PRIVATE
+    force_controller_core
+    OpenSSL::Crypto
+)
+target_compile_definitions(rebot_trajectory_exporter
+  PRIVATE
+    PROJECT_ROOT_DIR="${PROJECT_ROOT_DIR}"
+    PROJECT_GIT_COMMIT="${PROJECT_GIT_COMMIT}"
+)
+add_test(
+  NAME rebot_trajectory_exporter_phase5b_provenance
+  COMMAND rebot_trajectory_exporter
+    --generate-coefficients ${CMAKE_BINARY_DIR}/rebot_phase5b_A.coefficients.csv
+    --output ${CMAKE_BINARY_DIR}/rebot_phase5b_A.replay.csv
+    --metadata ${CMAKE_BINARY_DIR}/rebot_phase5b_A.meta.yaml
+    --seed 20260826
+    --accepted-attempt 6
+    --expected-coefficient-sha256
+      86a5481c0c2459bb6e3f01d0aee4c247f4f0ed71aa444f77b6d1458c1f7cd529
+    --sample-rate-hz 100
+    --overwrite
+)
+
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   add_executable(rebot_trajectory_renderer
     src/app/rebot_trajectory_renderer.cpp

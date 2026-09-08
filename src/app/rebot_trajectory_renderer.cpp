@@ -47,6 +47,16 @@ struct TrajectoryPoint {
   std::array<double, kDof> position{};
 };
 
+enum class TrajectorySchema {
+  SimulationActual,
+  ReplayExactCommand,
+};
+
+struct TrajectoryData {
+  std::vector<TrajectoryPoint> points;
+  TrajectorySchema schema{TrajectorySchema::SimulationActual};
+};
+
 /** Print the supported command-line interface. */
 void printUsage() {
   std::cout
@@ -198,8 +208,8 @@ double parseCsvValue(const std::vector<std::string> &row, std::size_t column,
   return value;
 }
 
-/** Load the exact reBot simulation states needed for visual replay. */
-std::vector<TrajectoryPoint> loadTrajectory(const fs::path &path) {
+/** Load either legacy simulation actual-q CSV or frozen exact-command replay CSV. */
+TrajectoryData loadTrajectory(const fs::path &path) {
   std::ifstream input(path);
   if (!input) {
     throw std::runtime_error("无法读取轨迹 CSV: " + path.string());
@@ -217,6 +227,45 @@ std::vector<TrajectoryPoint> loadTrajectory(const fs::path &path) {
     }
   }
 
+  TrajectoryData trajectory;
+  const bool replay_schema = columns.find("time") != columns.end();
+  if (replay_schema) {
+    trajectory.schema = TrajectorySchema::ReplayExactCommand;
+    const std::size_t time_column = requiredColumn(columns, "time");
+    std::array<std::size_t, kDof> q_ref_columns{};
+    for (std::size_t joint = 0; joint < kDof; ++joint) {
+      q_ref_columns[joint] =
+          requiredColumn(columns, "q_ref" + std::to_string(joint));
+      requiredColumn(columns, "qd_ref" + std::to_string(joint));
+      requiredColumn(columns, "qdd_ref" + std::to_string(joint));
+    }
+
+    std::size_t line_number = 1;
+    while (std::getline(input, line)) {
+      ++line_number;
+      if (line.empty()) {
+        continue;
+      }
+      const auto row = splitCsv(line);
+      TrajectoryPoint point;
+      point.time = parseCsvValue(row, time_column, line_number);
+      for (std::size_t joint = 0; joint < kDof; ++joint) {
+        point.position[joint] =
+            parseCsvValue(row, q_ref_columns[joint], line_number);
+      }
+      if (!trajectory.points.empty() &&
+          point.time <= trajectory.points.back().time) {
+        throw std::runtime_error("replay CSV time 必须严格递增");
+      }
+      trajectory.points.push_back(point);
+    }
+    if (trajectory.points.size() < 2) {
+      throw std::runtime_error("replay CSV 至少需要两个命令采样点");
+    }
+    return trajectory;
+  }
+
+  trajectory.schema = TrajectorySchema::SimulationActual;
   const std::size_t begin_column = requiredColumn(columns, "time_begin");
   const std::size_t end_column = requiredColumn(columns, "time_end");
   std::array<std::size_t, kDof> q_columns{};
@@ -227,7 +276,6 @@ std::vector<TrajectoryPoint> loadTrajectory(const fs::path &path) {
         requiredColumn(columns, "q_next" + std::to_string(joint));
   }
 
-  std::vector<TrajectoryPoint> points;
   std::array<double, kDof> previous_next{};
   double previous_end = 0.0;
   std::size_t line_number = 1;
@@ -252,8 +300,8 @@ std::vector<TrajectoryPoint> loadTrajectory(const fs::path &path) {
       next[joint] = parseCsvValue(row, q_next_columns[joint], line_number);
     }
 
-    if (!points.empty()) {
-      if (begin <= points.back().time) {
+    if (!trajectory.points.empty()) {
+      if (begin <= trajectory.points.back().time) {
         throw std::runtime_error("CSV time_begin 必须严格递增");
       }
       if (std::abs(begin - previous_end) > kContinuityTolerance) {
@@ -267,21 +315,22 @@ std::vector<TrajectoryPoint> loadTrajectory(const fs::path &path) {
       }
     }
 
-    points.push_back(point);
+    trajectory.points.push_back(point);
     previous_end = end;
     previous_next = next;
   }
 
-  if (points.empty()) {
+  if (trajectory.points.empty()) {
     throw std::runtime_error("轨迹 CSV 不包含数据行");
   }
-  points.push_back(TrajectoryPoint{previous_end, previous_next});
-  return points;
+  trajectory.points.push_back(TrajectoryPoint{previous_end, previous_next});
+  return trajectory;
 }
 
-/** Interpolate six joint positions at one simulation timestamp. */
-std::array<double, kDof>
-interpolatePosition(const std::vector<TrajectoryPoint> &points, double time) {
+/** Sample positions without changing the command trajectory semantics. */
+std::array<double, kDof> positionAt(const TrajectoryData &trajectory,
+                                    double time) {
+  const auto &points = trajectory.points;
   if (time <= points.front().time) {
     return points.front().position;
   }
@@ -295,6 +344,12 @@ interpolatePosition(const std::vector<TrajectoryPoint> &points, double time) {
                          return value < point.time;
                        });
   const auto lower = std::prev(upper);
+  if (trajectory.schema == TrajectorySchema::ReplayExactCommand) {
+    // Exact-command preview is zero-order hold on the actual sampled Servo
+    // commands. It never reconstructs/interpolates a second mathematical path.
+    return lower->position;
+  }
+
   const double alpha = (time - lower->time) / (upper->time - lower->time);
   std::array<double, kDof> result{};
   for (std::size_t joint = 0; joint < kDof; ++joint) {
@@ -529,7 +584,8 @@ void preparePaths(const RenderOptions &options) {
 
 /** Render the selected trajectory interval and encode all frames. */
 void renderVideo(const RenderOptions &options,
-                 const std::vector<TrajectoryPoint> &points) {
+                 const TrajectoryData &trajectory) {
+  const auto &points = trajectory.points;
   const double trajectory_begin = points.front().time;
   const double trajectory_end = points.back().time;
   const double clip_begin = options.start_time.value_or(trajectory_begin);
@@ -562,7 +618,7 @@ void renderVideo(const RenderOptions &options,
         std::min(clip_end, clip_begin + static_cast<double>(frame) *
                                             options.playback_speed /
                                             static_cast<double>(options.fps));
-    renderer.render(interpolatePosition(points, simulation_time), rgb);
+    renderer.render(positionAt(trajectory, simulation_time), rgb);
     encoder.writeFrame(rgb);
     if ((frame + 1) % progress_interval == 0 || frame + 1 == frame_count) {
       std::cout << "Rendered " << (frame + 1) << "/" << frame_count
@@ -573,7 +629,12 @@ void renderVideo(const RenderOptions &options,
   encoder.finish();
   std::cout << "视频已保存到: " << options.output << "\n"
             << "frames=" << frame_count << " fps=" << options.fps
-            << " playback_speed=" << options.playback_speed << std::endl;
+            << " playback_speed=" << options.playback_speed << "\n"
+            << "preview_mode="
+            << (trajectory.schema == TrajectorySchema::ReplayExactCommand
+                    ? "exact_command_zero_order_hold"
+                    : "dynamic_simulation_actual_q")
+            << std::endl;
 }
 
 } // namespace

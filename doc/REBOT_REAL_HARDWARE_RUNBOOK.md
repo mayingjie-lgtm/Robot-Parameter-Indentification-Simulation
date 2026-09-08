@@ -2,7 +2,7 @@
 
 > 本文同时给出 **2026-09-07 当前已可执行能力** 与 **reBot 真机系统辨识完整目标流程**。
 >
-> 当前仓库已有 `state_only`、真实 `servo_hold` 记录、单轴往返 `joint_jog`（软件/Mock 验证，实机 commissioning PENDING）和 `rebot_trajectory_renderer` 离线 MP4 回放；六轴真机轨迹 provider、同一 artifact 的 exact-command preview/验收、真机数据预处理和真机参数辨识仍有明确软件/标定门禁，不得把目标步骤误认为已经实现。
+> 当前仓库已有 `state_only`、真实 `servo_hold` 记录、单轴往返 `joint_jog`（软件/Mock 验证，实机 commissioning PENDING），以及 frozen trajectory exporter / numerical qualification / exact-command renderer / matching-hash Mock replay 软件链。真实六轴 excitation 仍受人工 preview acceptance、J1/J6、hardware replay-rate/limits、真机数据预处理和辨识级标定门禁约束，不得把软件/Mock PASS 当成真机授权。
 >
 > 任一步不通过，立即停止，不跳过门禁。仿真数值门限、simulation truth 和 MuJoCo-only 字段不得直接搬到真机。
 
@@ -676,18 +676,17 @@ PASS 条件：
 当前已有：
 
 - `joint_jog` 软件/Mock 入口，可作为后续 R4 单关节 commissioning 工具；
-- `rebot_trajectory_renderer`，可把已有 reBot 关节状态 CSV 离线渲染成 MP4；
-- C++ `FourierTrajectory` 和已验证的仿真 A/B 轨迹生成链。
+- `rebot_trajectory_renderer`，既支持 simulation actual-q CSV，也支持 frozen replay CSV；
+- C++ `FourierTrajectory` 和已验证的 Phase5B A 系数 provenance；
+- `rebot_trajectory_exporter`：从 C++ Fourier accepted coefficient stream 导出固定采样 replay artifact；
+- `trajectory_artifact.py` / `qualify_rebot_trajectory.py`：校验 artifact hash/provenance/fixed grid，并生成数值报告与默认 `accepted_for_hardware: false` 的 acceptance 模板；
+- `RebotHardwareRunner` excitation：仅 replay `artifact.samples[i].q_ref`，不插值、不重采样、不重算 Fourier；任何 artifact/preview gate 失败都发生在 client factory / `ArmClient` 创建前；
+- Mock excitation 可用 deterministic clock 完整 replay，不需要真实等待 30 s。
 
-当前仍缺少的关键连接是：**把最终准备发送给真机的同一份冻结 trajectory artifact，先在离线软件中
-完整检查和可视化，再由硬件 provider 原样 replay。** `control_mode: excitation` 目前仍会在创建
-hardware session 前报：
-
-```text
-trajectory source integration remains pending
-```
-
-不要用 `MoveJ`、手写 Python Fourier 或另外生成一份“看起来差不多”的轨迹绕过该限制。
+当前软件链已经接通到 **frozen artifact -> qualification -> exact-command preview gate -> matching-hash replay**。
+仍然禁止真实六轴 excitation，因为 J1 identification-grade convention、J6 geometry、100 Hz hardware rate certification、
+acceleration/jerk 官方限值以及人工 preview acceptance 尚未完成。不要用 `MoveJ`、手写 Python Fourier 或
+另外生成一份“看起来差不多”的轨迹绕过该门禁。
 
 ### 8.2 强制门禁：真机轨迹必须先离线可视化
 
@@ -724,9 +723,10 @@ RebotHardwareRunner loads the SAME artifact/hash
 2. **dynamic simulation preview（推荐）**：使用同一份系数/artifact 在 MuJoCo 中执行，查看控制跟踪、
    actuator saturation/contact 等仿真现象。它可以发现动力学问题，但不能代替 exact-command preview。
 
-现有 `rebot_trajectory_renderer` 目前读取 simulation-truth CSV；下一步软件应让它直接接受统一的
-trajectory preview/replay schema，或提供由同一 C++ `FourierTrajectory` 导出的兼容 preview CSV。
-禁止在 Python 中重写 Fourier 方程来生成“预览版本”，否则预览与真机命令可能不是同一条轨迹。
+现有 `rebot_trajectory_renderer` 已直接接受统一的 replay schema：
+`time/q_ref0..5/qd_ref0..5/qdd_ref0..5`。replay 模式直接把 frozen `q_ref` 写入 MuJoCo qpos 后
+调用 `mj_forward()`，并按 zero-order hold 生成视频；不会调用 `mj_step()`，也不会在视频侧插值出
+第二条轨迹。simulation-truth schema 仍保留用于 dynamic simulation actual-q 回放。
 
 每次 preview 至少生成并保存：
 
@@ -789,9 +789,9 @@ collision/precheck result（若模型可用）
 
 继续前必须补齐：
 
-1. 将 C++ `FourierTrajectory` 已接受的系数通过统一 replay/provider 接入 preview 与真机 `q_target`；
-2. 实现 §8.2 的 exact-command CSV/数值报告/MP4/acceptance hash 门禁；
-3. `joint_jog` 完成 R4 后，先设计显著低幅的 trajectory C，并先 preview 再实机；
+1. 人工观看当前 exact-command MP4，并只对 matching trajectory SHA 手工决定 acceptance；
+2. 完成 J1 identification-grade convention、J6 geometry、100 Hz replay rate 和 acceleration/jerk hardware limits 的正式确认；
+3. `joint_jog` 完成 R4 后，设计显著低幅的 trajectory C，并沿同一 frozen artifact -> preview -> acceptance -> replay 流程验证；
 4. C 通过后再冻结独立轨迹 A（training）和 B（validation），A/B 分别 preview、分别保存 hash；
 5. 实现真机专用离线预处理：时间对齐、滤波、重采样和 `qdd` 估计；
 6. 独立核验 `effort_reported` 的来源、方向、比例、单位和物理标定；
@@ -1159,7 +1159,7 @@ position-only ArmClient.servo_joint(q_target)
 
 ## 15.2 当前必须完成的软件门禁
 
-在允许 `control_mode: excitation` 前，代码需要做到：
+当前 `control_mode: excitation` 的软件/Mock 链已经做到：
 
 - 读取冻结 trajectory artifact；
 - 校验机器人、DOF、初始位、采样率、duration、hash；
@@ -1175,13 +1175,10 @@ position-only ArmClient.servo_joint(q_target)
 - feedback stale / fault / servo ownership 立即 fail closed；
 - 正常退出和异常退出都执行明确的 Servo cleanup。
 
-当前 runner 对 `excitation` 明确报：
-
-```text
-excitation trajectory source integration remains pending
-```
-
-在上述实现完成前，不得用 MoveJ、临时脚本或手写 Fourier 绕过。
+上述门禁已经落到 frozen replay 路径；runner 不再用“trajectory source pending”占位错误拒绝。
+但 **软件入口可用不等于真实硬件获准**：正式 hardware config 仍保持 `allow_hardware: false`、
+`allow_motion: false`、`joint_mapping_verified: false`、`j1_convention: UNRESOLVED`。在人工 acceptance、
+J1/J6 和 hardware-rate/limit certification 完成前，不得用 MoveJ、临时脚本或手写 Fourier 绕过。
 
 # 16. R4～R6：从 commissioning 到冻结 A/B
 
@@ -1745,7 +1742,7 @@ RMSE 变小就直接扩大运动范围。
 | J2～J6 辨识级 mapping/zero 记录 | 未冻结 | **是** |
 | J6 几何模型一致性 | 4.316 mm 冲突 | **是** |
 | effort_reported 独立 Nm 标定 | 未完成 | **是** |
-| excitation trajectory provider | runner 明确 PENDING | **是** |
+| frozen excitation replay/provider | 软件/Mock 已实现；真机门禁未解除 | **是** |
 | 单关节/六轴 commissioning | 未执行 | **是** |
 | 真机 A/B 正式采集 | 未执行 | **是** |
 | 真机 qdd preprocessing | 未实现 | **是** |
@@ -1758,7 +1755,7 @@ RMSE 变小就直接扩大运动范围。
 ```text
 1. 关闭 J1～J6 mapping/zero + J6 geometry
 2. 完成 effort_reported 独立力矩标定
-3. 接入 trusted trajectory replay/provider
+3. 人工完成 exact-command preview acceptance，并确认 hardware replay rate/limits
 4. 单关节 -> 六轴 commissioning
 5. 实现 hardware preprocessing + real identification mode
 6. 冻结 A/B，正式采集

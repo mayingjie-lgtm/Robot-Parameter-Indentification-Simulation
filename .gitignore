@@ -41,6 +41,7 @@
 *.dwo
 
 build/
+build_*/
 install/
 log/
 .cache/

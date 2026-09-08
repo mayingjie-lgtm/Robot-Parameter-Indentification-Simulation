@@ -13,6 +13,7 @@ from .control_adapter import RebotControlAdapter, RebotControlError
 from .hardware_recorder import HardwareExperimentRecorder
 from .joint_jog import jog_target_at, validate_joint_jog
 from .state_capture import CaptureSample, JOINT_COUNT
+from .trajectory_artifact import ReplayArtifact, ReplaySample, load_replay_artifact, validate_preview_acceptance, validate_replay_runtime_limits
 
 
 CONTROL_MODES = {"state_only", "servo_hold", "joint_jog", "excitation"}
@@ -51,13 +52,19 @@ def load_hardware_config(
         "joint_position_min_rad": [-2.8, -3.14, -3.14, -1.87, -1.57, -3.14],
         "joint_position_max_rad": [2.8, 0.0, 0.0, 1.57, 1.57, 3.14],
         "maximum_command_velocity_rad_s": [0.05] * JOINT_COUNT,
+        "maximum_command_acceleration_rad_s2": [2.0] * JOINT_COUNT,
+        "maximum_command_jerk_rad_s3": [10.0] * JOINT_COUNT,
+        "start_position_tolerance_rad": 0.01,
         "maximum_feedback_age_ms": 50.0,
         "maximum_disabled_feedback_age_ms": None,
         "connect_timeout_s": 3.0,
         "command_timeout_s": 3.0,
         "state_timeout_s": 0.25,
-        "trajectory_source": "pending_cxx_fourier_integration",
+        "trajectory_source": "frozen_replay_artifact",
         "trajectory_hash": None,
+        "trajectory_artifact": "results/rebot_trajectory_preview/trajectory_preview.csv",
+        "trajectory_metadata": "results/rebot_trajectory_preview/trajectory_preview.meta.yaml",
+        "trajectory_preview_acceptance": "results/rebot_trajectory_preview/preview_acceptance.yaml",
     }
     unknown = set(parsed) - set(config)
     if unknown:
@@ -98,13 +105,24 @@ def load_hardware_config(
         "joint_position_min_rad",
         "joint_position_max_rad",
         "maximum_command_velocity_rad_s",
+        "maximum_command_acceleration_rad_s2",
+        "maximum_command_jerk_rad_s3",
     ):
         config[name] = list(_six_finite(config[name], name))
     for lower, upper in zip(config["joint_position_min_rad"], config["joint_position_max_rad"]):
         if lower >= upper:
             raise ValueError("each joint position minimum must be smaller than maximum")
-    if any(value <= 0.0 for value in config["maximum_command_velocity_rad_s"]):
-        raise ValueError("maximum_command_velocity_rad_s values must be positive")
+    for name in (
+        "maximum_command_velocity_rad_s",
+        "maximum_command_acceleration_rad_s2",
+        "maximum_command_jerk_rad_s3",
+    ):
+        if any(value <= 0.0 for value in config[name]):
+            raise ValueError(f"{name} values must be positive")
+    config["start_position_tolerance_rad"] = _positive(
+        config["start_position_tolerance_rad"],
+        "start_position_tolerance_rad",
+    )
     for name in ("maximum_feedback_age_ms", "connect_timeout_s", "command_timeout_s", "state_timeout_s"):
         config[name] = _positive(config[name], name)
     disabled_age = config["maximum_disabled_feedback_age_ms"]
@@ -120,6 +138,15 @@ def load_hardware_config(
         output = root / output
     config["output_csv"] = str(output)
     config["trajectory_source"] = str(config["trajectory_source"])
+    for name in (
+        "trajectory_artifact",
+        "trajectory_metadata",
+        "trajectory_preview_acceptance",
+    ):
+        evidence_path = Path(str(config[name])).expanduser()
+        if not evidence_path.is_absolute():
+            evidence_path = root / evidence_path
+        config[name] = str(evidence_path)
     if config["control_mode"] == "joint_jog":
         validate_joint_jog(config)
     return config
@@ -156,11 +183,29 @@ class RebotHardwareRunner:
             output = Path(self.config["output_csv"])
             if output.exists() or output.with_suffix(".meta.yaml").exists():
                 raise FileExistsError("joint_jog requires new output paths; existing evidence is not overwritten")
+        replay_artifact: ReplayArtifact | None = None
         if mode == "excitation":
-            raise RuntimeError(
-                "excitation trajectory source integration remains pending; the trusted Fourier "
-                "implementation is C++ and is intentionally not duplicated in Python"
+            if self.config.get("trajectory_source") != "frozen_replay_artifact":
+                raise ValueError(
+                    "excitation requires trajectory_source=frozen_replay_artifact"
+                )
+            replay_artifact = load_replay_artifact(
+                self.config["trajectory_artifact"],
+                self.config["trajectory_metadata"],
             )
+            configured_hash = self.config.get("trajectory_hash")
+            if configured_hash not in (None, "", replay_artifact.sha256):
+                raise ValueError(
+                    "configured trajectory_hash does not match frozen artifact"
+                )
+            validate_replay_runtime_limits(replay_artifact, self.config)
+            validate_preview_acceptance(
+                self.config["trajectory_preview_acceptance"],
+                replay_artifact,
+                repo_root=self.repo_root,
+            )
+            self.config["trajectory_hash"] = replay_artifact.sha256
+            self.config["duration_s"] = replay_artifact.duration_s
 
         adapter = RebotControlAdapter(
             sdk_root=self.config["sdk_root"],
@@ -192,6 +237,10 @@ class RebotHardwareRunner:
                 self._run_servo_hold(adapter, recorder, session)
             elif mode == "joint_jog":
                 self._run_joint_jog(adapter, recorder, session)
+            elif mode == "excitation":
+                if replay_artifact is None:
+                    raise AssertionError("validated excitation artifact is missing")
+                self._run_excitation(adapter, recorder, session, replay_artifact)
             else:
                 raise AssertionError(f"unhandled control mode {mode}")
         except BaseException as exc:
@@ -416,6 +465,113 @@ class RebotHardwareRunner:
         result["return_error_rad"] = [returned[i] - baseline[i] for i in range(JOINT_COUNT)]
         adapter.exit_servo()
         session["servo"] = False
+
+    def _run_excitation(
+        self,
+        adapter: RebotControlAdapter,
+        recorder: HardwareExperimentRecorder,
+        session: dict[str, bool],
+        artifact: ReplayArtifact,
+    ) -> None:
+        """Replay every frozen q_ref sample exactly once; never interpolate or resample."""
+
+        initial = adapter.read_state()
+        self._validate_state(
+            initial,
+            require_servo_active=False,
+            feedback_age_limit_key="maximum_disabled_feedback_age_ms",
+        )
+        if initial.robot_mode != "disabled" or initial.safety_state != "disabled":
+            raise RebotControlError("excitation requires an initially disabled robot")
+        self._validate_excitation_start(initial.q, artifact.q_start)
+
+        adapter.enable()
+        session["enabled"] = True
+        ready = adapter.read_state()
+        self._validate_state(ready, require_servo_active=False)
+        self._validate_excitation_start(ready.q, artifact.q_start)
+
+        adapter.enter_servo()
+        session["servo"] = True
+        session["motion_lifecycle"] = True
+        state = adapter.read_state()
+        self._validate_state(state, require_servo_active=True)
+
+        previous_sample: ReplaySample | None = None
+        previous_target = artifact.q_start
+        for sample_index, sample in enumerate(artifact.samples):
+            self._validate_state(state, require_servo_active=True)
+            self._validate_excitation_dynamics(sample, previous_sample, artifact.sample_rate_hz)
+            self._validate_command(sample.q_ref, state.q)
+            if sample_index > 0:
+                self._validate_command(sample.q_ref, previous_target)
+
+            timestamp_ns, sequence = adapter.send_servo_target(sample.q_ref)
+            recorder.record(
+                state,
+                q_cmd=sample.q_ref,
+                timestamp_host_command_ns=timestamp_ns,
+                servo_sequence=sequence,
+                command_valid=True,
+                control_mode="excitation",
+            )
+            previous_sample = sample
+            previous_target = sample.q_ref
+            if sample_index + 1 < len(artifact.samples):
+                self._sleep_period()
+                state = adapter.read_state()
+
+        adapter.exit_servo()
+        session["servo"] = False
+
+    def _validate_excitation_start(
+        self,
+        measured_q: Sequence[float],
+        q_start: Sequence[float],
+    ) -> None:
+        measured = _six_finite(measured_q, "measured_q")
+        start = _six_finite(q_start, "artifact q_start")
+        tolerance = float(self.config["start_position_tolerance_rad"])
+        for index, (actual, expected) in enumerate(zip(measured, start)):
+            if abs(actual - expected) > tolerance:
+                raise RebotControlError(
+                    f"excitation start J{index + 1} differs from frozen artifact "
+                    f"q_ref[0] by more than {tolerance} rad"
+                )
+
+    def _validate_excitation_dynamics(
+        self,
+        sample: ReplaySample,
+        previous: ReplaySample | None,
+        sample_rate_hz: float,
+    ) -> None:
+        for index in range(JOINT_COUNT):
+            if (
+                abs(sample.qd_ref[index])
+                > self.config["maximum_command_velocity_rad_s"][index] + 1e-12
+            ):
+                raise RebotControlError(
+                    f"excitation frozen J{index + 1} velocity limit exceeded"
+                )
+            if (
+                abs(sample.qdd_ref[index])
+                > self.config["maximum_command_acceleration_rad_s2"][index] + 1e-12
+            ):
+                raise RebotControlError(
+                    f"excitation frozen J{index + 1} acceleration limit exceeded"
+                )
+            if previous is not None:
+                jerk = abs(
+                    (sample.qdd_ref[index] - previous.qdd_ref[index])
+                    * sample_rate_hz
+                )
+                if (
+                    jerk
+                    > self.config["maximum_command_jerk_rad_s3"][index] + 1e-9
+                ):
+                    raise RebotControlError(
+                        f"excitation frozen J{index + 1} jerk limit exceeded"
+                    )
 
     def _validate_jog_envelope(self, origin: Sequence[float], jog: dict[str, Any]) -> None:
         for index, value in enumerate(origin):
