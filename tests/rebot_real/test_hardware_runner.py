@@ -165,6 +165,53 @@ class RebotHardwareRunnerTest(unittest.TestCase):
             self.assertEqual([float(row[f"q_cmd{i}"]) for i in range(6)], current_q)
             self.assertEqual(row["command_valid"], "1")
 
+    def test_servo_hold_waits_for_udp_ready_and_servo_state_transitions(self) -> None:
+        class DelayedTransitionsMock(MockArmClient):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self._ready_reads = 0
+                self._servo_reads = 0
+                self._servo_transition_pending = False
+
+            def enable(self, timeout_s: float = 5.0):
+                reply = super().enable(timeout_s=timeout_s)
+                self.safety_state = "enabling"
+                self.robot_mode = "idle"
+                self._ready_reads = 0
+                return reply
+
+            def enter_servo(self, timeout_s: float = 3.0):
+                reply = super().enter_servo(timeout_s=timeout_s)
+                self.servo_active = False
+                self.servo_mode = "ready"
+                self._servo_reads = 0
+                self._servo_transition_pending = True
+                return reply
+
+            @property
+            def state_store(self):
+                if self.enabled and self.safety_state == "enabling":
+                    if self._ready_reads >= 1:
+                        self.safety_state = "ready"
+                    self._ready_reads += 1
+                elif self._servo_transition_pending:
+                    if self._servo_reads >= 1:
+                        self.servo_active = True
+                        self._servo_transition_pending = False
+                    self._servo_reads += 1
+                return MockArmClient.state_store.fget(self)
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._servo_config(directory)
+            current_q = [0.3, -1.0, -1.2, 0.2, -0.3, 0.4]
+            fake = DelayedTransitionsMock(position_rad=current_q)
+            metadata = self._runner(config, fake).run()
+            enter_index = fake.calls.index("enter_servo")
+            servo_index = fake.calls.index("servo_joint")
+            self.assertGreaterEqual(fake.calls[enter_index + 1:servo_index].count("read_state"), 2)
+            self.assertEqual(fake.servo_targets, [tuple(current_q)])
+            self.assertEqual(metadata["observed_sample_count"], 1)
+
     def test_command_position_limit_rejection(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config = self._servo_config(directory)

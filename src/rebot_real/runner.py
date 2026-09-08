@@ -327,17 +327,19 @@ class RebotHardwareRunner:
         adapter.enable()
         session["enabled"] = True
 
-        # Re-read immediately before Servo entry. This exact measured q is the hold
-        # target; no configured home pose is used for hardware hold.
-        hold_state = adapter.read_state()
-        self._validate_state(hold_state, require_servo_active=False)
+        # TCP enable can complete before the UDP state stream has published the
+        # lower FSM transition to Ready/idle. Wait for that explicit motion-ready
+        # state before claiming Servo ownership, matching the SDK high-level policy.
+        hold_state = self._wait_until_motion_ready(adapter)
         hold_target = tuple(hold_state.q)
         adapter.enter_servo()
         session["servo"] = True
         session["motion_lifecycle"] = True
 
-        state = adapter.read_state()
-        self._validate_state(state, require_servo_active=True)
+        # TCP enter_servo ACK and UDP state publication are not causally ordered.
+        # Do not treat the first post-ACK UDP packet as authoritative; wait for a
+        # fresh packet that actually reports Servo ownership before sending q_cmd.
+        state = self._wait_until_servo_active(adapter)
         start = self.monotonic_fn()
         samples = 0
         while not self._done(start, samples):
@@ -389,8 +391,7 @@ class RebotHardwareRunner:
         # Set intent first: an ACK timeout can occur after lower has acted.
         session["enabled"] = True
         adapter.enable()
-        state = adapter.read_state()
-        self._validate_state(state, require_servo_active=False)
+        state = self._wait_until_motion_ready(adapter)
         self._validate_jog_envelope(state.q, jog)
         for index in range(JOINT_COUNT):
             if abs(state.q[index] - initial.q[index]) > jog["maximum_other_joint_drift_rad"]:
@@ -405,8 +406,7 @@ class RebotHardwareRunner:
         }, sort_keys=True, allow_nan=False).encode("utf-8")).hexdigest()
         session["servo"] = session["motion_lifecycle"] = True
         adapter.enter_servo()
-        state = adapter.read_state()
-        self._validate_state(state, require_servo_active=True)
+        state = self._wait_until_servo_active(adapter)
         start = self.monotonic_fn()
         previous_time: float | None = None
         previous_velocity = [0.0] * JOINT_COUNT
@@ -511,8 +511,7 @@ class RebotHardwareRunner:
         adapter.configure_movej_pvt()
         adapter.enable()
         session["enabled"] = True
-        ready = adapter.read_state()
-        self._validate_state(ready, require_servo_active=False)
+        ready = self._wait_until_motion_ready(adapter)
 
         preposition_start = tuple(ready.q)
         movej_sent = False
@@ -558,8 +557,7 @@ class RebotHardwareRunner:
         adapter.enter_servo()
         session["servo"] = True
         session["motion_lifecycle"] = True
-        state = adapter.read_state()
-        self._validate_state(state, require_servo_active=True)
+        state = self._wait_until_servo_active(adapter)
 
         previous_sample: ReplaySample | None = None
         previous_target = artifact.q_start
@@ -687,6 +685,52 @@ class RebotHardwareRunner:
                 raise PermissionError("historical J1 convention is accepted for servo_hold smoke only")
             if not self.mock_backend and self.config["j1_convention"].startswith("MOCK"):
                 raise PermissionError("Mock mapping cannot authorize real joint_jog")
+
+    def _wait_until_motion_ready(self, adapter: RebotControlAdapter) -> CaptureSample:
+        """Wait for fresh UDP state to confirm lower Ready/idle after enable."""
+
+        deadline = self.monotonic_fn() + float(self.config["command_timeout_s"])
+        last_mode = "unknown"
+        last_safety = "unknown"
+        while True:
+            state = adapter.read_state()
+            self._validate_state(state, require_servo_active=False)
+            last_mode = state.robot_mode
+            last_safety = state.safety_state
+            if state.robot_mode == "idle" and state.safety_state == "ready":
+                return state
+            now = self.monotonic_fn()
+            if now >= deadline:
+                break
+            self.sleep_fn(min(0.02, max(0.0, deadline - now)))
+        raise RebotControlError(
+            "timed out waiting for motion-ready state after enable "
+            f"(robot_mode={last_mode}, safety_state={last_safety})"
+        )
+
+    def _wait_until_servo_active(self, adapter: RebotControlAdapter) -> CaptureSample:
+        """Wait for UDP state to confirm Servo ownership before sending any target."""
+
+        deadline = self.monotonic_fn() + float(self.config["command_timeout_s"])
+        last_mode = "unknown"
+        last_safety = "unknown"
+        last_servo_mode = "unknown"
+        while True:
+            state = adapter.read_state()
+            self._validate_state(state, require_servo_active=None)
+            last_mode = state.robot_mode
+            last_safety = state.safety_state
+            last_servo_mode = state.servo_mode
+            if state.servo_active:
+                return state
+            now = self.monotonic_fn()
+            if now >= deadline:
+                break
+            self.sleep_fn(min(0.02, max(0.0, deadline - now)))
+        raise RebotControlError(
+            "timed out waiting for servo_active=true after enter_servo "
+            f"(robot_mode={last_mode}, safety_state={last_safety}, servo_mode={last_servo_mode})"
+        )
 
     def _validate_state(
         self,
