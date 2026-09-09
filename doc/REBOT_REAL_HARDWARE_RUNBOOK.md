@@ -694,7 +694,30 @@ PASS 条件：
 当前软件链已经接通到 **frozen artifact -> qualification -> exact-command preview gate -> SDK MoveJ preposition -> q0 verification -> matching-hash replay**。
 2026-09-09 的 A_run03 进一步证明：公开 `ArmClient.servo_joint()` 同步等待 TCP accept/reject，实际 command dispatch 约为 100 Hz，而不是配置中的 200 Hz；旧 5 ms fixed-reference timestamp 因而累计了约 1.515 s skew。runner 现已改为发送真实 dispatch monotonic timestamp，普通 excitation tracking lag 只记录为质量证据，不再单独触发失能。
 
-100 Hz A 已从**同一组 C++ Fourier 系数直接重新评价**为 3001 点、30 s frozen artifact，未从 200 Hz CSV 抽样；但其 J4 最大相邻 target delta 为 `0.0034906093336 rad`，超过 Lower 固定 `0.003125 rad` ServoCore 单包 gate。因此 A@100 Hz 当前数值 qualification 为 **FAIL**，不得人工把 acceptance 改成 true，也不得放宽 Lower gate 绕过。仍然禁止真实六轴 excitation，直到生成满足固定 jump gate 的新 A artifact，并完成 J1/J6、硬件 limits 和 matching-hash preview acceptance。SDK MoveJ 只允许作为通过全部前置门禁后的 q0 预定位手段。
+历史 A 已从**同一组 C++ Fourier 系数直接在 100 Hz fixed grid 重新评价**为 3001 点、30 s frozen artifact，未从 200 Hz CSV 抽样。其 coefficient SHA 为 `86a5481c0c2459bb6e3f01d0aee4c247f4f0ed71aa444f77b6d1458c1f7cd529`，trajectory SHA 为 `81be01bbfa44b933c194d9bb6d5755b4efb81bff9bfc0008020e1efba394d8e9`。该 old A 的 position、velocity、acceleration、jerk、start/end continuity 和 collision/model precheck 都 PASS；唯一 blocking qualification 是 J4 在 sample 1164 的相邻 frozen target delta `0.0034906093335972943 rad` 超过 Lower 固定 `0.003125 rad` ServoCore 单包 target-jump gate，margin 为 `-0.00036560933359729413 rad`。这个 `0.003125 rad` 是固定 per-packet target jump gate，不是 tracking-error gate。
+
+同一个连续 Fourier trajectory 在更低 replay rate 下，相邻 packet 的时间间隔更长，所以本项目当前轨迹的相邻 frozen target step 会随 `dt` 增大而近似增大；不能把“连续曲线满足速度/加速度限制”直接等价为“每个 Servo packet 都满足固定 jump gate”，也不应写成在数学上永远严格翻倍。
+
+2026-09-09 已完成新的 100 Hz hardware-compatible A 搜索和离线收口。搜索仍复用 C++ `FourierTrajectory`、原 q0 `[0, -1, -1, 0, 0, -0.6]`、5 harmonics、30 s / 3001 点 fixed grid，并把 `0.0028 rad` 作为比 Lower hard gate 更严格的 candidate design margin；没有修改 `0.003125 rad` Lower gate，没有 Python Fourier、没有旧 CSV 抽点、没有对 frozen `q_ref` 做插值/平滑/后处理。搜索共评价 644 个 candidate，其中 design-safety PASS 17 个、rank PASS 17 个、condition PASS 12 个、最终 accepted candidate 12 个；选中 `seed=20260918, attempt=18`。
+
+新 A coefficient SHA 为 `d7c492ce56d7f7fb02b001bf9505c78679fa5f8a8f2f9488e4b5234a96fe9289`，trajectory SHA 为 `be2faa1d58fc834efbca030aea7ec9fbb28d57895aae8e449f36164e6141f131`。它不是 old A 的 uniform scaling：78-column regressor rank 保持 `52 -> 52`，effective condition number 从约 `201.64041794` 改善到 `62.40655638`，minimum effective singular value 从约 `0.01650671617` 提升到 `0.05271473722`；即 condition ratio 约 `0.3095`、sigma_min ratio 约 `3.1935`。当前项目已有 regressor conditioning 指标没有因为安全约束而退化，未额外引入新的 identification 主指标。
+
+新 A 的 100 Hz 每轴最大 target step / sample index / Lower hard-gate margin 为：
+
+```text
+J1  0.0017004399271349780  @2614  margin 0.0014245600728650222
+J2  0.0018011981750374328  @1795  margin 0.0013238018249625673
+J3  0.0015910576091981987  @1245  margin 0.0015339423908018015
+J4  0.0013838798796061424  @ 349  margin 0.0017411201203938577
+J5  0.0023868853863908066  @1066  margin 0.0007381146136091936
+J6  0.0009089373027025838  @2341  margin 0.0022160626972974164
+```
+
+最紧的是 J5，但仍满足 `0.002386885386 < 0.0028 < 0.003125`。`preview_report.yaml` 对 sample rate、sample count、duration、start/end continuity、position、velocity、acceleration、jerk、collision/model、Servo target delta 均为 PASS，且 `servo_target_delta_design_status: PASS`。
+
+同一 trajectory SHA 的 exact-command MP4 位于 `results/rebot_real_ab_servo_safe_100hz_optimized/A/preview.mp4`；`preview_acceptance.yaml` 仍为 `accepted_for_hardware: false`。完整 Mock replay 已按 100 Hz 执行 3001 个 frozen `q_ref` sample，`motion_status: completed`、`catch_up_burst_count=0`、`command_dispatch_timestamp_mismatch_count=0`，并明确记录 `exact frozen q_ref sequence; no runner resampling; no catch-up burst`。普通 excitation tracking lag 继续是 `monitor_only_quality_warning`，不会单独立即 fail-safe；stale/invalid feedback、primary fault、unsafe safety state、Servo reject/command failure、state snapshot stale 仍保持立即 fail-safe。
+
+真实 A 尚未授权、尚未执行。下一人工停止点仍是观看上述 exact-command `preview.mp4`，并且只能对 trajectory SHA `be2faa1d58fc834efbca030aea7ec9fbb28d57895aae8e449f36164e6141f131` 手工决定 acceptance。SDK MoveJ 只允许作为通过全部前置门禁后的 q0 预定位手段。
 
 ### 8.2 强制门禁：真机轨迹必须先离线可视化
 

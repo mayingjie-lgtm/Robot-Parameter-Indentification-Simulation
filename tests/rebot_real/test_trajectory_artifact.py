@@ -21,6 +21,7 @@ from rebot_real.runner import RebotHardwareRunner, load_hardware_config
 from rebot_real.trajectory_artifact import (
     CSV_COLUMNS,
     load_replay_artifact,
+    qualify_replay_artifact,
     sha256_file,
     validate_preview_acceptance,
     validate_replay_runtime_limits,
@@ -171,6 +172,14 @@ class ReplayFixture:
 
 
 class TrajectoryArtifactTest(unittest.TestCase):
+    def _require_local_evidence(self, *paths: Path) -> None:
+        missing = [str(path) for path in paths if not path.exists()]
+        if missing:
+            self.skipTest(
+                "ignored offline evidence is not present in this checkout: "
+                + ", ".join(missing)
+            )
+
     def test_artifact_sha_correct(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             fixture = ReplayFixture(directory)
@@ -252,11 +261,99 @@ class TrajectoryArtifactTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, pattern):
                     load_replay_artifact(fixture.artifact, fixture.metadata)
 
+    def test_historical_100hz_A_fails_and_optimized_A_passes_same_gate(self) -> None:
+        qualification = yaml.safe_load(
+            (REPO_ROOT / "config/rebot_trajectory_preview.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        old_root = REPO_ROOT / "results/rebot_real_ab_servo_safe_100hz/A"
+        new_root = (
+            REPO_ROOT / "results/rebot_real_ab_servo_safe_100hz_optimized/A"
+        )
+        self._require_local_evidence(
+            old_root / "trajectory.csv",
+            old_root / "trajectory.meta.yaml",
+            new_root / "trajectory.csv",
+            new_root / "trajectory.meta.yaml",
+        )
+        old_artifact = load_replay_artifact(
+            old_root / "trajectory.csv", old_root / "trajectory.meta.yaml"
+        )
+        new_artifact = load_replay_artifact(
+            new_root / "trajectory.csv", new_root / "trajectory.meta.yaml"
+        )
+
+        old_report = qualify_replay_artifact(old_artifact, qualification)
+        new_report = qualify_replay_artifact(new_artifact, qualification)
+
+        self.assertEqual(old_report["preview_status"], "FAIL")
+        self.assertEqual(old_report["servo_target_delta_design_status"], "FAIL")
+        self.assertEqual(
+            old_report["failures"],
+            [
+                "J4 ServoCore target delta gate violated: "
+                "0.00349060933 > 0.003125 rad"
+            ],
+        )
+        self.assertAlmostEqual(
+            old_report["per_joint"][3]["servo_target_delta_abs_max"],
+            0.0034906093335972943,
+            places=15,
+        )
+
+        self.assertEqual(new_report["preview_status"], "PASS")
+        self.assertEqual(new_report["servo_target_delta_design_status"], "PASS")
+        self.assertEqual(new_report["failures"], [])
+        self.assertLessEqual(
+            max(
+                item["servo_target_delta_abs_max"]
+                for item in new_report["per_joint"]
+            ),
+            0.0028 + 1e-12,
+        )
+
+    def test_optimized_A_excitation_quality_regression(self) -> None:
+        report_path = (
+            REPO_ROOT
+            / "results/rebot_real_ab_servo_safe_100hz_optimized/A/search_report.yaml"
+        )
+        self._require_local_evidence(report_path)
+        report = yaml.safe_load(report_path.read_text(encoding="utf-8"))
+        baseline = report["baseline"]
+        selected = report["selected"]
+        self.assertEqual(report["status"], "PASS")
+        self.assertGreaterEqual(report["accepted_candidate_count"], 2)
+        self.assertEqual(baseline["quality"]["rank"], 52)
+        self.assertEqual(selected["quality"]["rank"], 52)
+        self.assertLess(
+            selected["quality"]["effective_condition_number"],
+            baseline["quality"]["effective_condition_number"],
+        )
+        self.assertGreater(
+            selected["quality"]["minimum_effective_singular_value"],
+            baseline["quality"]["minimum_effective_singular_value"],
+        )
+        self.assertTrue(
+            all(value >= 0.05 for value in selected["qd_abs_max_per_joint"])
+        )
+
     def _validate_runtime(self, fixture: ReplayFixture, **updates) -> None:
         artifact = load_replay_artifact(fixture.artifact, fixture.metadata)
         config = fixture.runtime_config()
         config.update(updates)
         validate_replay_runtime_limits(artifact, config)
+
+    def test_servo_target_delta_violation_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = ReplayFixture(directory)
+            rows = fixture.default_rows()
+            rows[1][1] = Q0[0] + 0.004
+            fixture.write_artifact(rows=rows)
+            with self.assertRaisesRegex(
+                ValueError, "exceeds lower ServoCore fixed gate"
+            ):
+                self._validate_runtime(fixture)
 
     def test_position_violation_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -617,11 +714,17 @@ class TrajectoryArtifactTest(unittest.TestCase):
             self.assertEqual(fake.movej_targets, [])
             self.assertEqual(fake.servo_targets, [])
 
-    def test_real_frozen_artifact_park_movej_then_exact_3001_replay(self) -> None:
-        artifact_path = REPO_ROOT / "results/rebot_trajectory_preview/trajectory_preview.csv"
-        metadata_path = REPO_ROOT / "results/rebot_trajectory_preview/trajectory_preview.meta.yaml"
-        report_path = REPO_ROOT / "results/rebot_trajectory_preview/trajectory_preview_report.yaml"
-        mp4_path = REPO_ROOT / "results/rebot_trajectory_preview/trajectory_preview.mp4"
+    def test_optimized_A_park_movej_then_exact_3001_replay(self) -> None:
+        run_root = (
+            REPO_ROOT / "results/rebot_real_ab_servo_safe_100hz_optimized/A"
+        )
+        artifact_path = run_root / "trajectory.csv"
+        metadata_path = run_root / "trajectory.meta.yaml"
+        report_path = run_root / "preview_report.yaml"
+        mp4_path = run_root / "preview.mp4"
+        self._require_local_evidence(
+            artifact_path, metadata_path, report_path, mp4_path
+        )
         artifact = load_replay_artifact(artifact_path, metadata_path)
         self.assertEqual(len(artifact.samples), 3001)
         with tempfile.TemporaryDirectory() as directory:
@@ -633,9 +736,9 @@ class TrajectoryArtifactTest(unittest.TestCase):
                     "trajectory_sha256": artifact.sha256,
                     "preview_report": str(report_path),
                     "preview_mp4": str(mp4_path),
-                    "operator": "offline-mock-test",
-                    "review_date": "2026-09-08",
-                    "accepted_for_hardware": True,
+                    "operator": "",
+                    "review_date": None,
+                    "accepted_for_hardware": False,
                 }, sort_keys=False),
                 encoding="utf-8",
             )
@@ -649,9 +752,6 @@ class TrajectoryArtifactTest(unittest.TestCase):
             config["trajectory_artifact"] = str(artifact_path)
             config["trajectory_metadata"] = str(metadata_path)
             config["trajectory_preview_acceptance"] = str(acceptance)
-            # This test verifies exact replay mechanics of the historical artifact;
-            # production qualification of its 100 Hz ServoCore jump gate is tested separately.
-            config["maximum_servo_target_delta_rad"] = 0.01
             clock_ns = [1_000_000_000]
 
             def monotonic_ns() -> int:
@@ -679,6 +779,15 @@ class TrajectoryArtifactTest(unittest.TestCase):
                 monotonic_ns_fn=monotonic_ns,
             ).run()
             expected = [sample.q_ref for sample in artifact.samples]
+            self.assertEqual(metadata["motion_status"], "completed")
+            self.assertEqual(metadata["observed_sample_count"], 3001)
+            self.assertEqual(metadata["dispatch_timing"]["catch_up_burst_count"], 0)
+            self.assertEqual(
+                metadata["dispatch_timing"][
+                    "command_dispatch_timestamp_mismatch_count"
+                ],
+                0,
+            )
             self.assertEqual(fake.movej_targets, [artifact.q_start])
             self.assertEqual(metadata["preposition"]["movej_command_count"], 1)
             self.assertEqual(len(fake.servo_targets), 3002)

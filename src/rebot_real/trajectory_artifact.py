@@ -249,6 +249,20 @@ def qualify_replay_artifact(
     max_target_delta = float(config["maximum_servo_target_delta_rad"])
     if not math.isfinite(max_target_delta) or max_target_delta <= 0.0:
         raise ValueError("maximum_servo_target_delta_rad must be positive and finite")
+    design_target_raw = config.get("servo_target_delta_design_limit_rad")
+    design_target_delta = (
+        float(design_target_raw) if design_target_raw is not None else None
+    )
+    if design_target_delta is not None:
+        if (
+            not math.isfinite(design_target_delta)
+            or design_target_delta <= 0.0
+            or design_target_delta >= max_target_delta
+        ):
+            raise ValueError(
+                "servo_target_delta_design_limit_rad must be positive, finite, "
+                "and strictly below maximum_servo_target_delta_rad"
+            )
     expected_start = _six_limit(config, "expected_start_position_rad")
     for joint in range(JOINT_COUNT):
         if not lower[joint] < upper[joint]:
@@ -337,6 +351,17 @@ def qualify_replay_artifact(
             "servo_target_delta_abs_max": target_delta_abs_max,
             "servo_target_delta_abs_max_sample_index": target_delta_abs_max_sample_index,
             "servo_target_delta_margin_rad": max_target_delta - target_delta_abs_max,
+            "servo_target_delta_design_limit_rad": design_target_delta,
+            "servo_target_delta_design_margin_rad": (
+                None
+                if design_target_delta is None
+                else design_target_delta - target_delta_abs_max
+            ),
+            "servo_target_delta_design_pass": (
+                None
+                if design_target_delta is None
+                else target_delta_abs_max <= design_target_delta + 1e-12
+            ),
             "minimum_position_limit_margin": minimum_margin,
             "start_position": q_values[0],
             "end_position": q_values[-1],
@@ -392,6 +417,19 @@ def qualify_replay_artifact(
         "duration_s": artifact.duration_s,
         "sample_rate_hz": artifact.sample_rate_hz,
         "maximum_servo_target_delta_rad": max_target_delta,
+        "servo_target_delta_design_limit_rad": design_target_delta,
+        "servo_target_delta_design_status": (
+            None
+            if design_target_delta is None
+            else (
+                "PASS"
+                if all(
+                    item["servo_target_delta_design_pass"] is True
+                    for item in per_joint
+                )
+                else "FAIL"
+            )
+        ),
         "jerk_method": (
             "forward_difference_of_stored_qdd_on_fixed_artifact_grid"
         ),

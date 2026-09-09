@@ -181,6 +181,23 @@ add_test(
     --overwrite
 )
 
+add_executable(rebot_hardware_excitation_search
+  src/app/rebot_hardware_excitation_search.cpp
+)
+target_include_directories(rebot_hardware_excitation_search
+  PRIVATE
+    src/identification/include
+)
+target_link_libraries(rebot_hardware_excitation_search
+  PRIVATE
+    force_controller_core
+    rebot_pinocchio_dynamics
+    OpenSSL::Crypto
+)
+target_compile_definitions(rebot_hardware_excitation_search
+  PRIVATE PROJECT_ROOT_DIR="${PROJECT_ROOT_DIR}"
+)
+
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   add_executable(rebot_trajectory_renderer
     src/app/rebot_trajectory_renderer.cpp

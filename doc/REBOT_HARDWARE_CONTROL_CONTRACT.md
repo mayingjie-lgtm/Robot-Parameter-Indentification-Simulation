@@ -121,11 +121,13 @@ tau_cmd
 real reBot torque command.
 
 `RebotControlAdapter` supplies an explicit monotonically increasing Servo sequence and an
-upper-host `time.monotonic_ns()` timestamp to `ArmClient.servo_joint`. The audited Python
-`ArmClient.servo_joint` sends the TCP payload and returns `(request_id, sequence)` without
-waiting for a synchronous `CommandReply`; therefore the adapter does not invent a lower-side
-acceptance result. The runner re-checks subsequent state/fault/Servo status, while the lower
-Servo safety layer remains authoritative. There is no implicit second command contract.
+upper-host `time.monotonic_ns()` timestamp to `ArmClient.servo_joint`. In the currently audited
+SDK, public `ArmClient.servo_joint()` calls `_send_and_wait(...)`: every Servo packet waits for
+the matching TCP accept/reject before the Python call returns, and a reject/command failure is
+raised instead of being treated as a successful dispatch. This synchronous ACK behavior is why
+the A_run03 configured at 200 Hz only sustained about 100 Hz command dispatch. The runner still
+re-checks subsequent state/fault/Servo status, and the lower Servo safety layer remains
+authoritative; no second command contract is invented above it.
 
 ## 5. Coordinate mapping contract
 
@@ -341,6 +343,38 @@ through `reference_dispatch_skew_ns`; actual dispatch start/interval min/mean/P9
 effective command rate, late-cycle count and catch-up count are summarized separately.
 A late cycle delays the next target; it never causes a short-period catch-up send.
 
+For the current hardware-compatible A, the frozen grid is 100 Hz / 3001 samples / 30 s. The
+Lower ServoCore per-packet target-jump gate remains fixed at `0.003125 rad`; `0.0028 rad` is
+only the stricter search/design margin and is reported separately. Lowering replay rate for
+the same continuous Fourier function increases the interval between frozen packets, so the
+adjacent target step generally increases approximately with `dt`; continuous-curve safety
+alone therefore does not certify per-packet Servo safety.
+
+The 2026-09-09 offline evidence is frozen as follows:
+
+```text
+historical A coefficient SHA   86a5481c0c2459bb6e3f01d0aee4c247f4f0ed71aa444f77b6d1458c1f7cd529
+historical A trajectory SHA    81be01bbfa44b933c194d9bb6d5755b4efb81bff9bfc0008020e1efba394d8e9
+historical A J4 max step        0.0034906093335972943 rad @ sample 1164
+historical A blocking gate      J4 Lower ServoCore fixed per-packet target-step gate only
+
+optimized A seed / attempt      20260918 / 18
+optimized coefficient SHA       d7c492ce56d7f7fb02b001bf9505c78679fa5f8a8f2f9488e4b5234a96fe9289
+optimized trajectory SHA        be2faa1d58fc834efbca030aea7ec9fbb28d57895aae8e449f36164e6141f131
+rank old -> new                 52 -> 52
+effective condition old -> new 201.64041794 -> 62.40655638
+sigma_min effective old -> new 0.01650671617 -> 0.05271473722
+```
+
+The optimized A was found by multi-seed/attempt C++ Fourier search, not by uniform scaling,
+CSV downsampling, Python interpolation, or post-processing of frozen `q_ref`. Its per-joint
+100 Hz maximum target steps are J1 `0.0017004399271`, J2 `0.0018011981750`, J3
+`0.0015910576092`, J4 `0.0013838798796`, J5 `0.0023868853864`, J6 `0.0009089373027` rad;
+all pass both the `0.0028 rad` design target and the unchanged `0.003125 rad` Lower gate.
+The exact-command Mock replay completed all 3001 samples at nominal 100 Hz with
+`catch_up_burst_count=0` and `command_dispatch_timestamp_mismatch_count=0`. Real A has not
+been executed; the matching preview acceptance remains `accepted_for_hardware: false`.
+
 This is software/Mock capability only. Real Fourier excitation remains prohibited until
 real-hardware mapping/geometry, replay-rate/limit certification and human preview
 acceptance are complete.
@@ -511,7 +545,10 @@ Mock 100 Hz no-catch-up timing             = PASS
 Mock tracking monitor-only behavior        = PASS
 Mock hard-fault/stale/reject injection     = PASS
 
-A@100 Hz numerical qualification           = BLOCKED (J4 target step 0.003490609 rad > 0.003125 rad fixed gate)
+historical A@100 Hz numerical qualification = FAIL (J4 target step 0.0034906093335972943 rad > 0.003125 rad fixed gate)
+optimized A@100 Hz numerical qualification  = PASS (seed 20260918, attempt 18; design target 0.0028 rad PASS)
+optimized A exact-command Mock replay       = PASS (3001 samples, no catch-up burst, no dispatch timestamp mismatch)
+optimized A preview human acceptance        = PENDING (`accepted_for_hardware: false`)
 real hardware state acceptance            = PENDING
 joint mapping verification                = PENDING
 J1 convention                             = UNRESOLVED
