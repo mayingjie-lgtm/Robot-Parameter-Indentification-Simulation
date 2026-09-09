@@ -53,18 +53,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tcp-port", type=int, help="override TCP command port")
     parser.add_argument("--udp-port", type=int, help="override UDP state port")
     parser.add_argument("--output", type=Path, help="override hardware experiment CSV path")
-    parser.add_argument(
-        "--allow-hardware",
-        action="store_true",
-        default=None,
-        help="explicitly override allow_hardware=true for this invocation",
-    )
-    parser.add_argument(
-        "--allow-motion",
-        action="store_true",
-        default=None,
-        help="explicitly override allow_motion=true for this invocation",
-    )
     return parser.parse_args()
 
 
@@ -78,8 +66,6 @@ def main() -> int:
         "tcp_port": args.tcp_port,
         "udp_port": args.udp_port,
         "output_csv": str(args.output) if args.output is not None else None,
-        "allow_hardware": args.allow_hardware,
-        "allow_motion": args.allow_motion,
     }
     config = load_hardware_config(args.config, repo_root=REPO_ROOT, overrides=overrides)
     client_factory = None
