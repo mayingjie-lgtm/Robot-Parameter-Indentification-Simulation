@@ -186,7 +186,7 @@ python3 scripts/run_rebot_hardware.py \
 ```text
 backend=rebot_sdk_mock
 control_mode=state_only
-schema_version=rebot_hardware_experiment_v1
+schema_version=rebot_hardware_experiment_v2
 mock_only=true; no real hardware was contacted
 ```
 
@@ -692,7 +692,7 @@ PASS 条件：
 - Mock excitation 可从 `[0, 0, 0, 0, 0, pi/2]` 近似停放姿态开始，用 deterministic clock 完整 replay，不需要真实等待 30 s。
 
 当前软件链已经接通到 **frozen artifact -> qualification -> exact-command preview gate -> SDK MoveJ preposition -> q0 verification -> matching-hash replay**。
-仍然禁止真实六轴 excitation，因为 J1 identification-grade convention、J6 geometry、100 Hz hardware rate certification、
+仍然禁止真实六轴 excitation，因为 J1 identification-grade convention、J6 geometry、200 Hz hardware rate certification、
 acceleration/jerk 官方限值以及人工 preview acceptance 尚未完成。SDK MoveJ 只允许作为通过全部前置门禁后的 q0 预定位手段，
 不得用独立 MoveJ、手写 Python Fourier 或另外生成一份“看起来差不多”的轨迹代替/绕过 frozen replay 与 acceptance。
 
@@ -804,7 +804,7 @@ collision/precheck result（若模型可用）
 继续前必须补齐：
 
 1. 人工观看当前 exact-command MP4，并只对 matching trajectory SHA 手工决定 acceptance；
-2. 完成 J1 identification-grade convention、J6 geometry、100 Hz replay rate 和 acceleration/jerk hardware limits 的正式确认；
+2. 完成 J1 identification-grade convention、J6 geometry、200 Hz replay rate 和 acceleration/jerk hardware limits 的正式确认；
 3. `joint_jog` 完成 R4 后，设计显著低幅的 trajectory C，并沿同一 frozen artifact -> preview -> acceptance -> replay 流程验证；
 4. C 通过后再冻结独立轨迹 A（training）和 B（validation），A/B 分别 preview、分别保存 hash；
 5. 实现真机专用离线预处理：时间对齐、滤波、重采样和 `qdd` 估计；
@@ -1188,7 +1188,8 @@ MoveJ 本身不是 identification artifact 的一部分，也不进入 identific
 - 六轴起点误差必须满足 `start_position_tolerance_rad`，且 `|qd|` 必须满足 `preposition_settle_velocity_tolerance_rad_s`；
 - 已经在 q0 且静止时跳过 no-op MoveJ；
 - 每个 frozen Servo 目标做 position limit 检查；
-- 每周期做 velocity-derived delta 检查；
+- 连续 `q_ref[k]-q_ref[k-1]` 同时检查 velocity-derived delta 与 ServoCore 单包固定跳变量；
+- `q_ref-q_measured` 只检查独立的 `maximum_tracking_error_rad`，该阈值不除以频率；
 - 加入 acceleration/jerk 上位机门禁，不能只依赖 lower；
 - 记录每个发送的 `q_cmd`、command timestamp、sequence；
 - feedback stale / fault / servo ownership 立即 fail closed；
@@ -1256,8 +1257,9 @@ temperature numeric thresholds 等仍有未标定/禁用项，所以“lower 没
 
 ## 16.3 控制频率不能照搬仿真 1000 Hz
 
-当前硬件 runner 为 100 Hz 候选，SDK 开发 ServoJ 有 200 Hz 使用路径，lower 内部还有自己的
-高频控制。正式轨迹频率必须根据实测：
+当前 A/B artifact 与 hardware runner 的候选发送频率为 200 Hz。Servo replay 复用最新 UDP
+快照而不逐包阻塞等待新 frame，并用 `state_timeout_s` 单独限制 host snapshot age；lower 内部
+还有自己的高频控制。正式轨迹频率仍必须根据实测：
 
 - upper command acceptance；
 - UDP feedback rate；
@@ -1329,12 +1331,16 @@ B_run01/
 
 ## 17.2 raw CSV 的权威含义
 
-当前 `rebot_hardware_experiment_v1` 原始数据包含：
+当前 `rebot_hardware_experiment_v2` 原始数据包含：
 
 ```text
 timestamp_host_rx_ns
 timestamp_lower_ns
 timestamp_host_command_ns
+actual_dispatch_timestamp_ns
+actual_dispatch_interval_ns
+reference_dispatch_skew_ns
+state_snapshot_age_ms
 servo_sequence
 q0..q5
 qd0..qd5
@@ -1378,8 +1384,9 @@ timestamp_host_rx_ns
 `timestamp_lower_ns` 来自 lower 的 steady clock，不是电机硬件时间；在没有明确时钟同步
 模型时，不要直接与 upper 的 command timestamp 相减得到“网络延迟”。
 
-`timestamp_host_command_ns` 与 host receive time 在同一主机时钟域，可用于 q_cmd 跟踪分析，
-但 q_cmd 不是辨识力矩。
+excitation 的 `timestamp_host_command_ns` 是传给 lower 的固定 reference timestamp，严格按
+5 ms 递增；`actual_dispatch_timestamp_ns` 是实际发送开始时刻。两者与 host receive time 在
+同一主机 monotonic 时钟域，可用于 q_cmd 跟踪与调度分析，但 q_cmd 不是辨识力矩。
 
 # 18. R8：真机离线预处理
 

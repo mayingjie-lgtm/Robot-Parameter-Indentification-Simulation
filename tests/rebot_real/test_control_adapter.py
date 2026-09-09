@@ -70,6 +70,20 @@ class RebotControlAdapterTest(unittest.TestCase):
         self.assertAlmostEqual(fake.servo_targets[0][0], 0.2)
         self.assertEqual(fake.servo_targets[0][1:], (0.0, 0.0, 0.0, 0.0, 0.0))
 
+    def test_servo_target_accepts_explicit_reference_timestamp(self) -> None:
+        fake = MockArmClient()
+        adapter = self._adapter(fake, monotonic_ns_fn=lambda: 111)
+        adapter.connect()
+        adapter.enable()
+        adapter.enter_servo()
+        timestamp, sequence = adapter.send_servo_target(
+            [0.0] * 6,
+            host_timestamp_ns=987654321,
+        )
+        self.assertEqual(timestamp, 987654321)
+        self.assertEqual(sequence, 1)
+        self.assertEqual(fake.servo_command_records[0][0], 987654321)
+
     def test_servo_target_rejects_non_six_dof_shape(self) -> None:
         fake = MockArmClient()
         adapter = self._adapter(fake)
@@ -110,12 +124,35 @@ class RebotControlAdapterTest(unittest.TestCase):
         self.assertEqual(fake.movej_targets[0][1:], (-1.0, -1.0, 0.0, 0.0, -0.6))
         self.assertEqual(fake.servo_targets, [])
 
+    def test_park_policy_maps_sdk_space_into_runner_canonical_space(self) -> None:
+        fake = MockArmClient()
+        adapter = self._adapter(
+            fake,
+            joint_direction=[1, 1, 1, 1, 1, 1],
+            joint_offset_rad=[-math.pi, 0, 0, 0, 0, 0],
+        )
+        adapter.connect()
+        policy = adapter.park_policy()
+        self.assertEqual(policy["source"], "mock_movej_runtime_policy")
+        self.assertAlmostEqual(policy["target_q"][0], 0.0)
+        self.assertEqual(policy["target_q"][1:5], (0.0, 0.0, 0.0, 0.0))
+        self.assertAlmostEqual(policy["target_q"][5], math.pi / 2)
+        self.assertAlmostEqual(policy["max_velocity_rad_s"][0], math.radians(10.0))
+        self.assertAlmostEqual(policy["position_tolerance_rad"], math.radians(1.0))
+
     def test_sdk_command_failure_is_normalized(self) -> None:
         fake = MockArmClient(fail_on={"enable"})
         adapter = self._adapter(fake)
         adapter.connect()
         with self.assertRaisesRegex(RebotControlError, "enable failed"):
             adapter.enable()
+
+    def test_latest_state_transport_failure_is_normalized_without_waiting(self) -> None:
+        fake = MockArmClient(disconnect_after_state_reads=0)
+        adapter = self._adapter(fake)
+        adapter.connect()
+        with self.assertRaisesRegex(RebotControlError, "latest state snapshot failed"):
+            _ = adapter.latest_state
 
     def test_configure_pvt_failure_is_normalized(self) -> None:
         fake = MockArmClient(fail_on={"configure_pvt"})

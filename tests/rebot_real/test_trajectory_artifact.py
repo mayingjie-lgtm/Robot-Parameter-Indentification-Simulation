@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from dataclasses import replace
 import math
 from pathlib import Path
 import sys
@@ -140,6 +141,7 @@ class ReplayFixture:
         )
         config.update({
             "control_rate_hz": 100.0,
+            "duration_s": 0.02,
             "joint_position_min_rad": [-2.8, -3.14, -3.14, -1.87, -1.57, -3.14],
             "joint_position_max_rad": [2.8, 0.0, 0.0, 1.57, 1.57, 3.14],
             "maximum_command_velocity_rad_s": [1.0] * 6,
@@ -157,6 +159,7 @@ class ReplayFixture:
         config["allow_motion"] = True
         config["joint_mapping_verified"] = True
         config["j1_convention"] = "MOCK_CANONICAL_REBOT_DM"
+        config["joint_mapping_scope"] = "excitation"
         config["start_position_tolerance_rad"] = 0.01
         config["trajectory_source"] = "frozen_replay_artifact"
         config["trajectory_hash"] = None
@@ -296,6 +299,23 @@ class TrajectoryArtifactTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "exactly match"):
                 self._validate_runtime(fixture, control_rate_hz=50.0)
 
+    def test_runtime_duration_mismatch_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = ReplayFixture(directory)
+            with self.assertRaisesRegex(ValueError, "duration_s must exactly match"):
+                self._validate_runtime(fixture, duration_s=30.0)
+
+    def test_runtime_sample_count_mismatch_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = ReplayFixture(directory)
+            rows = fixture.default_rows()[:-1]
+            fixture.write_artifact(rows=rows)
+            artifact = load_replay_artifact(fixture.artifact, fixture.metadata)
+            artifact = replace(artifact, duration_s=0.02)
+            config = fixture.runtime_config()
+            with self.assertRaisesRegex(ValueError, "sample_count=.*fixed grid"):
+                validate_replay_runtime_limits(artifact, config)
+
     def _run_replay(self, fixture: ReplayFixture, *, factory):
         return RebotHardwareRunner(
             fixture.replay_config(),
@@ -404,8 +424,9 @@ class TrajectoryArtifactTest(unittest.TestCase):
             self.assertEqual(metadata["preposition"]["status"], "already_at_start")
             self.assertEqual(metadata["preposition"]["movej_command_count"], 0)
             self.assertEqual(fake.movej_targets, [])
-            self.assertEqual(len(fake.servo_targets), len(expected))
-            self.assertEqual(fake.servo_targets, expected)
+            self.assertEqual(len(fake.servo_targets), len(expected) + 1)
+            self.assertEqual(fake.servo_targets[0], artifact.q_start)
+            self.assertEqual(fake.servo_targets[1:], expected)
             with fixture.output.open("r", encoding="utf-8", newline="") as stream:
                 rows = [
                     row
@@ -436,7 +457,51 @@ class TrajectoryArtifactTest(unittest.TestCase):
             self.assertEqual(metadata["preposition"]["final_q"], list(artifact.q_start))
             self.assertEqual(metadata["preposition"]["max_position_error"], 0.0)
             self.assertEqual(metadata["preposition"]["max_velocity_after_move"], 0.0)
-            self.assertEqual(len(fake.servo_targets), len(artifact.samples))
+            self.assertEqual(len(fake.servo_targets), len(artifact.samples) + 1)
+            self.assertEqual(fake.servo_targets[0], artifact.q_start)
+            self.assertEqual(fake.servo_targets[1:], [sample.q_ref for sample in artifact.samples])
+
+    def test_movej_transient_velocity_waits_for_settle_before_servo(self) -> None:
+        class OneTransientVelocityFrameMock(MockArmClient):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self._post_movej = False
+                self._post_movej_reads = 0
+
+            def movej(self, *args, **kwargs):
+                reply = super().movej(*args, **kwargs)
+                self.velocity_rad_s = [0.02, 0, 0, 0, 0, 0]
+                self._post_movej = True
+                self._post_movej_reads = 0
+                return reply
+
+            @property
+            def state_store(self):
+                if self._post_movej:
+                    if self._post_movej_reads >= 1:
+                        self.velocity_rad_s = [0.0] * 6
+                    self._post_movej_reads += 1
+                return MockArmClient.state_store.fget(self)
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = ReplayFixture(directory)
+            fixture.write_preview_evidence()
+            artifact = load_replay_artifact(fixture.artifact, fixture.metadata)
+            fake = OneTransientVelocityFrameMock(
+                position_rad=[0.0, 0.0, 0.0, 0.0, 0.0, math.pi / 2],
+                follow_movej_targets=True,
+                follow_servo_targets=True,
+            )
+            metadata = self._run_replay(fixture, factory=lambda **_: fake)
+            movej_index = fake.calls.index("movej")
+            servo_index = fake.calls.index("enter_servo")
+            self.assertGreaterEqual(
+                fake.calls[movej_index + 1:servo_index].count("read_state"),
+                4,
+            )
+            self.assertEqual(metadata["preposition"]["movej_command_count"], 1)
+            self.assertEqual(metadata["preposition"]["max_velocity_after_move"], 0.0)
+            self.assertEqual(fake.servo_targets[0], artifact.q_start)
 
     def test_movej_reject_blocks_all_servo_commands(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -465,7 +530,7 @@ class TrajectoryArtifactTest(unittest.TestCase):
             fixture = ReplayFixture(directory)
             fixture.write_preview_evidence()
             fake = MockArmClient(position_rad=[0, 0, 0, 0, 0, math.pi / 2])
-            with self.assertRaisesRegex(RebotControlError, "excitation start"):
+            with self.assertRaisesRegex(RebotControlError, "preposition settle"):
                 self._run_replay(fixture, factory=lambda **_: fake)
             self.assertEqual(len(fake.movej_targets), 1)
             self.assertEqual(fake.servo_targets, [])
@@ -504,7 +569,7 @@ class TrajectoryArtifactTest(unittest.TestCase):
             fake = MockArmClient(
                 position_rad=[0, 0, 0, 0, 0, math.pi / 2],
                 follow_movej_targets=True,
-                after_movej_feedback_age_ms=[100.0] * 6,
+                after_movej_feedback_age_ms=[101.0] * 6,
             )
             with self.assertRaisesRegex(RebotControlError, "feedback stale"):
                 self._run_replay(fixture, factory=lambda **_: fake)
@@ -562,24 +627,46 @@ class TrajectoryArtifactTest(unittest.TestCase):
             )
             output = root / "full_replay.csv"
             config["output_csv"] = str(output)
+            config["control_rate_hz"] = 100.0
+            config["duration_s"] = 30.0
+            config["trajectory_artifact"] = str(artifact_path)
+            config["trajectory_metadata"] = str(metadata_path)
             config["trajectory_preview_acceptance"] = str(acceptance)
+            # This test verifies exact replay mechanics of the historical artifact;
+            # production qualification of its 100 Hz ServoCore jump gate is tested separately.
+            config["maximum_servo_target_delta_rad"] = 0.01
+            clock_ns = [1_000_000_000]
+
+            def monotonic_ns() -> int:
+                return clock_ns[0]
+
+            def monotonic() -> float:
+                return clock_ns[0] * 1e-9
+
+            def sleep(duration_s: float) -> None:
+                clock_ns[0] += max(0, int(math.ceil(duration_s * 1e9)))
+
             fake = MockArmClient(
                 position_rad=[0.0, 0.0, 0.0, 0.0, 0.0, math.pi / 2],
                 follow_movej_targets=True,
                 follow_servo_targets=True,
+                monotonic_ns_fn=monotonic_ns,
             )
             metadata = RebotHardwareRunner(
                 config,
                 repo_root=REPO_ROOT,
                 client_factory=lambda **_: fake,
                 mock_backend=True,
-                sleep_fn=lambda _: None,
+                sleep_fn=sleep,
+                monotonic_fn=monotonic,
+                monotonic_ns_fn=monotonic_ns,
             ).run()
             expected = [sample.q_ref for sample in artifact.samples]
             self.assertEqual(fake.movej_targets, [artifact.q_start])
             self.assertEqual(metadata["preposition"]["movej_command_count"], 1)
-            self.assertEqual(len(fake.servo_targets), 3001)
-            self.assertEqual(fake.servo_targets, expected)
+            self.assertEqual(len(fake.servo_targets), 3002)
+            self.assertEqual(fake.servo_targets[0], artifact.q_start)
+            self.assertEqual(fake.servo_targets[1:], expected)
             with output.open("r", encoding="utf-8", newline="") as stream:
                 rows = [row for row in csv.DictReader(stream) if row["command_valid"] == "1"]
             self.assertEqual(len(rows), 3001)

@@ -28,6 +28,14 @@ class CaptureSample:
     primary_fault_code: int
     servo_active: bool
     servo_mode: str
+    servo_last_accepted_sequence: int = 0
+    servo_target_age_ns: int = 0
+    servo_accepted_targets: int = 0
+    servo_rejected_targets: int = 0
+    servo_target_jump_rejects: int = 0
+    servo_velocity_rejects: int = 0
+    servo_acceleration_rejects: int = 0
+    servo_jerk_rejects: int = 0
 
 
 def _six(values: Sequence[Any], name: str) -> tuple[Any, ...]:
@@ -111,4 +119,18 @@ def map_sdk_state(
         primary_fault_code=int(state.primary_fault_code),
         servo_active=bool(state.servo_active),
         servo_mode=str(state.servo_mode),
+        servo_last_accepted_sequence=int(
+            getattr(state, "servo_last_accepted_sequence", 0)
+        ),
+        servo_target_age_ns=int(getattr(state, "servo_target_age_ns", 0)),
+        servo_accepted_targets=int(getattr(state, "servo_accepted_targets", 0)),
+        servo_rejected_targets=int(getattr(state, "servo_rejected_targets", 0)),
+        servo_target_jump_rejects=int(
+            getattr(state, "servo_target_jump_rejects", 0)
+        ),
+        servo_velocity_rejects=int(getattr(state, "servo_velocity_rejects", 0)),
+        servo_acceleration_rejects=int(
+            getattr(state, "servo_acceleration_rejects", 0)
+        ),
+        servo_jerk_rejects=int(getattr(state, "servo_jerk_rejects", 0)),
     )

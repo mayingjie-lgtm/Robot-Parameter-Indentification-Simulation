@@ -36,6 +36,8 @@ class MockArmClient:
         after_movej_feedback_valid: Sequence[bool] | None = None,
         after_movej_feedback_age_ms: Sequence[float] | None = None,
         after_movej_primary_fault_code: int | None = None,
+        state_update_period_s: float = 0.0,
+        monotonic_ns_fn=time.monotonic_ns,
     ) -> None:
         self.host = host
         self.tcp_port = int(tcp_port)
@@ -62,6 +64,11 @@ class MockArmClient:
             None if after_movej_feedback_age_ms is None else tuple(after_movej_feedback_age_ms)
         )
         self.after_movej_primary_fault_code = after_movej_primary_fault_code
+        self.state_update_period_s = float(state_update_period_s)
+        if not math.isfinite(self.state_update_period_s) or self.state_update_period_s < 0.0:
+            raise ValueError("state_update_period_s must be finite and non-negative")
+        self._monotonic_ns_fn = monotonic_ns_fn
+        self.state_updates_enabled = True
         self.calls: list[str] = []
         self.pvt_configurations: list[dict[str, tuple[float, ...]]] = []
         self.movej_targets: list[tuple[float, ...]] = []
@@ -71,11 +78,26 @@ class MockArmClient:
         self.connected = False
         self.enabled = False
         self.servo_active = False
+        # Command-path ownership is distinct from the UDP-published Servo bit.
+        # Real lower can accept the first hold after ENTER_SERVO ACK before the
+        # next UDP state snapshot reports servo_active=true.
+        self._servo_owned = False
         self.servo_mode = "disabled"
         self.robot_mode = "disabled"
         self._state_reads = 0
+        self._state_version = 0
+        self._published_snapshot = None
+        self._last_state_publish_ns: int | None = None
         self._request_id = 1
         self._last_servo_sequence = 0
+        self.servo_last_accepted_sequence = 0
+        self.servo_target_age_ns = 0
+        self.servo_accepted_targets = 0
+        self.servo_rejected_targets = 0
+        self.servo_target_jump_rejects = 0
+        self.servo_velocity_rejects = 0
+        self.servo_acceleration_rejects = 0
+        self.servo_jerk_rejects = 0
         self.movej_pvt_policy = {
             "current_bandwidth_hz": (1000.0,) * JOINT_COUNT,
             "velocity_kp": (0.01,) * JOINT_COUNT,
@@ -83,6 +105,19 @@ class MockArmClient:
             "position_kp": (100.0,) * JOINT_COUNT,
             "position_ki": (0.0,) * JOINT_COUNT,
             "current_limit_normalized": (0.1,) * JOINT_COUNT,
+        }
+        self.movej_park_policy = {
+            "target_position_rad": tuple(
+                math.radians(value) for value in (180.0, 0.0, 0.0, 0.0, 0.0, 90.0)
+            ),
+            "max_velocity_rad_s": tuple(
+                math.radians(value) for value in (10.0, 8.5, 9.0, 10.0, 10.0, 12.0)
+            ),
+            "max_acceleration_rad_s2": tuple(
+                math.radians(value) for value in (16.0, 12.0, 16.0, 20.0, 20.0, 24.0)
+            ),
+            "max_jerk_rad_s3": (math.radians(300.0),) * JOINT_COUNT,
+            "position_tolerance_rad": math.radians(1.0),
         }
 
         for name, values in (
@@ -113,17 +148,31 @@ class MockArmClient:
             raise ConnectionError("mock connection lost")
         if self.no_state:
             return SimpleNamespace(latest=None)
-        now_ns = time.monotonic_ns()
-        state = self._make_state(now_ns)
-        actual = SimpleNamespace(state=state, received_monotonic_ns=now_ns)
-        snapshot = SimpleNamespace(version=self._state_reads, actual=actual)
-        return SimpleNamespace(latest=snapshot)
+        now_ns = int(self._monotonic_ns_fn())
+        update_period_ns = int(round(self.state_update_period_s * 1e9))
+        due = (
+            self._published_snapshot is None
+            or update_period_ns == 0
+            or self._last_state_publish_ns is None
+            or now_ns - self._last_state_publish_ns >= update_period_ns
+        )
+        if self.state_updates_enabled and due:
+            self._state_version += 1
+            state = self._make_state(now_ns)
+            actual = SimpleNamespace(state=state, received_monotonic_ns=now_ns)
+            self._published_snapshot = SimpleNamespace(
+                version=self._state_version,
+                actual=actual,
+            )
+            self._last_state_publish_ns = now_ns
+        return SimpleNamespace(latest=self._published_snapshot)
 
     @property
     def latest_state(self):
         if self.no_state:
             return None
-        return self._make_state(time.monotonic_ns())
+        store = self.state_store
+        return None if store.latest is None else store.latest.actual.state
 
     def configure_pvt(
         self,
@@ -217,6 +266,7 @@ class MockArmClient:
         self._fail("enter_servo")
         if not self.enabled:
             raise RuntimeError("mock enter_servo requires enable")
+        self._servo_owned = True
         self.servo_active = True
         self.servo_mode = "ready"
         return self._done_reply()
@@ -232,14 +282,16 @@ class MockArmClient:
 
         self.calls.append("servo_joint")
         self._fail("servo_joint")
-        if not self.servo_active:
-            raise RuntimeError("mock servo_joint requires active Servo")
+        if not self._servo_owned:
+            raise RuntimeError("mock servo_joint requires accepted Servo ownership")
         target = tuple(float(value) for value in target_position_rad)
         if len(target) != JOINT_COUNT or not all(math.isfinite(value) for value in target):
             raise ValueError("mock Servo target must contain six finite values")
         sequence = int(servo_sequence or (self._last_servo_sequence + 1))
         timestamp = int(host_timestamp_ns or time.monotonic_ns())
         self._last_servo_sequence = sequence
+        self.servo_last_accepted_sequence = sequence
+        self.servo_accepted_targets += 1
         self.servo_mode = "servo"
         self.servo_targets.append(target)
         self.servo_command_records.append((timestamp, sequence, target))
@@ -255,6 +307,7 @@ class MockArmClient:
 
         self.calls.append("exit_servo")
         self._fail("exit_servo")
+        self._servo_owned = False
         self.servo_active = False
         self.servo_mode = "disabled"
         return self._done_reply()
@@ -272,6 +325,7 @@ class MockArmClient:
         self.calls.append("disable")
         self._fail("disable")
         self.enabled = False
+        self._servo_owned = False
         self.servo_active = False
         self.servo_mode = "disabled"
         self.robot_mode = "disabled"
@@ -293,13 +347,21 @@ class MockArmClient:
             feedback_valid=tuple(self.feedback_valid),
             torque_valid=tuple(self.torque_valid),
             feedback_age_ms=tuple(self.feedback_age_ms),
-            sequence=self._state_reads,
+            sequence=self._state_version,
             monotonic_time_ns=int(now_ns),
             robot_mode=self.robot_mode,
             safety_state=self.safety_state,
             primary_fault_code=self.primary_fault_code,
             servo_active=self.servo_active,
             servo_mode=self.servo_mode,
+            servo_last_accepted_sequence=self.servo_last_accepted_sequence,
+            servo_target_age_ns=self.servo_target_age_ns,
+            servo_accepted_targets=self.servo_accepted_targets,
+            servo_rejected_targets=self.servo_rejected_targets,
+            servo_target_jump_rejects=self.servo_target_jump_rejects,
+            servo_velocity_rejects=self.servo_velocity_rejects,
+            servo_acceleration_rejects=self.servo_acceleration_rejects,
+            servo_jerk_rejects=self.servo_jerk_rejects,
         )
 
     def _fail(self, operation: str) -> None:

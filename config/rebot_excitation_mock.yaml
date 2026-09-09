@@ -8,7 +8,7 @@ tcp_port: 5000
 udp_port: 5001
 
 control_mode: excitation
-control_rate_hz: 100.0
+control_rate_hz: 200.0
 duration_s: 30.0
 max_samples: null
 output_csv: /tmp/rebot_excitation_mock.csv
@@ -17,15 +17,17 @@ allow_hardware: false
 allow_motion: true
 joint_mapping_verified: true
 j1_convention: MOCK_CANONICAL_REBOT_DM
-joint_mapping_scope: servo_hold_only
+joint_mapping_scope: excitation
 joint_direction: [1, 1, 1, 1, 1, 1]
 joint_offset_rad: [0, 0, 0, 0, 0, 0]
 
 joint_position_min_rad: [-2.8, -3.14, -3.14, -1.87, -1.57, -3.14]
 joint_position_max_rad: [2.8, 0.0, 0.0, 1.57, 1.57, 3.14]
-maximum_command_velocity_rad_s: [1.0, 1.0, 1.0, 1.5, 1.5, 1.5]
-maximum_command_acceleration_rad_s2: [2.0, 2.0, 2.0, 3.0, 3.0, 3.0]
-maximum_command_jerk_rad_s3: [10.0, 10.0, 10.0, 15.0, 15.0, 15.0]
+maximum_command_velocity_rad_s: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
+maximum_command_acceleration_rad_s2: [0.698132, 0.558505, 0.698132, 0.837758, 0.837758, 1.047198]
+maximum_command_jerk_rad_s3: [40, 40, 40, 40, 40, 40]
+maximum_tracking_error_rad: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
+maximum_servo_target_delta_rad: 0.003125
 
 # Preposition MoveJ parameters are explicit and separate from frozen excitation limits.
 # These mirror the current SDK high-level MoveJ runtime policy; PVT gains themselves
@@ -37,7 +39,7 @@ movej_timeout_s: 60.0
 start_position_tolerance_rad: 0.01
 preposition_settle_velocity_tolerance_rad_s: 0.01
 
-maximum_feedback_age_ms: 50.0
+maximum_feedback_age_ms: 100.0
 maximum_disabled_feedback_age_ms: 50.0
 connect_timeout_s: 3.0
 command_timeout_s: 3.0
@@ -45,6 +47,6 @@ state_timeout_s: 0.25
 
 trajectory_source: frozen_replay_artifact
 trajectory_hash: null
-trajectory_artifact: results/rebot_trajectory_preview/trajectory_preview.csv
-trajectory_metadata: results/rebot_trajectory_preview/trajectory_preview.meta.yaml
-trajectory_preview_acceptance: /tmp/rebot_excitation_preview_acceptance.yaml
+trajectory_artifact: results/rebot_real_ab_servo_safe_200hz/A/trajectory.csv
+trajectory_metadata: results/rebot_real_ab_servo_safe_200hz/A/trajectory.meta.yaml
+trajectory_preview_acceptance: results/rebot_real_ab_servo_safe_200hz/A/preview_acceptance.yaml

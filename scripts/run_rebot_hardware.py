@@ -21,10 +21,13 @@ class DeterministicMockClock:
     """Advance Mock excitation time without wall-clock sleeping."""
 
     def __init__(self) -> None:
-        self.now_s = 0.0
+        self.now_s = 1.0
 
     def monotonic(self) -> float:
         return self.now_s
+
+    def monotonic_ns(self) -> int:
+        return int(round(self.now_s * 1e9))
 
     def sleep(self, duration_s: float) -> None:
         self.now_s += float(duration_s)
@@ -50,6 +53,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tcp-port", type=int, help="override TCP command port")
     parser.add_argument("--udp-port", type=int, help="override UDP state port")
     parser.add_argument("--output", type=Path, help="override hardware experiment CSV path")
+    parser.add_argument(
+        "--allow-hardware",
+        action="store_true",
+        default=None,
+        help="explicitly override allow_hardware=true for this invocation",
+    )
+    parser.add_argument(
+        "--allow-motion",
+        action="store_true",
+        default=None,
+        help="explicitly override allow_motion=true for this invocation",
+    )
     return parser.parse_args()
 
 
@@ -63,6 +78,8 @@ def main() -> int:
         "tcp_port": args.tcp_port,
         "udp_port": args.udp_port,
         "output_csv": str(args.output) if args.output is not None else None,
+        "allow_hardware": args.allow_hardware,
+        "allow_motion": args.allow_motion,
     }
     config = load_hardware_config(args.config, repo_root=REPO_ROOT, overrides=overrides)
     client_factory = None
@@ -77,6 +94,9 @@ def main() -> int:
                 else None,
                 follow_movej_targets=excitation,
                 follow_servo_targets=config["control_mode"] in {"joint_jog", "excitation"},
+                monotonic_ns_fn=(
+                    mock_clock.monotonic_ns if excitation else time.monotonic_ns
+                ),
             )
         if config["control_mode"] == "excitation":
             mock_clock = DeterministicMockClock()
@@ -87,6 +107,9 @@ def main() -> int:
         mock_backend=args.mock,
         sleep_fn=mock_clock.sleep if mock_clock is not None else time.sleep,
         monotonic_fn=mock_clock.monotonic if mock_clock is not None else time.monotonic,
+        monotonic_ns_fn=(
+            mock_clock.monotonic_ns if mock_clock is not None else time.monotonic_ns
+        ),
     )
     metadata = runner.run()
     output = Path(config["output_csv"])

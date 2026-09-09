@@ -246,6 +246,9 @@ def qualify_replay_artifact(
     max_qd = _six_limit(config, "maximum_command_velocity_rad_s")
     max_qdd = _six_limit(config, "maximum_command_acceleration_rad_s2")
     max_jerk = _six_limit(config, "maximum_command_jerk_rad_s3")
+    max_target_delta = float(config["maximum_servo_target_delta_rad"])
+    if not math.isfinite(max_target_delta) or max_target_delta <= 0.0:
+        raise ValueError("maximum_servo_target_delta_rad must be positive and finite")
     expected_start = _six_limit(config, "expected_start_position_rad")
     for joint in range(JOINT_COUNT):
         if not lower[joint] < upper[joint]:
@@ -257,6 +260,7 @@ def qualify_replay_artifact(
 
     expected_rate = float(config["expected_sample_rate_hz"])
     expected_duration = float(config["expected_duration_s"])
+    expected_sample_count = int(config["expected_sample_count"])
     rate_tol = float(config.get("sample_rate_tolerance_hz", 1e-8))
     duration_tol = float(config.get("duration_tolerance_s", 1e-9))
     start_position_tol = float(config["start_position_tolerance_rad"])
@@ -287,6 +291,11 @@ def qualify_replay_artifact(
             f"duration_s={artifact.duration_s:.17g} differs from "
             f"expected {expected_duration:.17g}"
         )
+    if len(artifact.samples) != expected_sample_count:
+        failures.append(
+            f"sample_count={len(artifact.samples)} differs from "
+            f"expected {expected_sample_count}"
+        )
 
     per_joint = []
     dt = 1.0 / artifact.sample_rate_hz
@@ -298,11 +307,22 @@ def qualify_replay_artifact(
             (current - previous) / dt
             for previous, current in zip(qdd_values, qdd_values[1:])
         ]
+        target_delta_values = [
+            abs(current - previous)
+            for previous, current in zip(q_values, q_values[1:])
+        ]
         q_min = min(q_values)
         q_max = max(q_values)
         qd_abs_max = max(abs(value) for value in qd_values)
         qdd_abs_max = max(abs(value) for value in qdd_values)
         jerk_abs_max = max((abs(value) for value in jerk_values), default=0.0)
+        if target_delta_values:
+            target_delta_abs_max_sample_index, target_delta_abs_max = max(
+                enumerate(target_delta_values, start=1),
+                key=lambda item: item[1],
+            )
+        else:
+            target_delta_abs_max_sample_index, target_delta_abs_max = 0, 0.0
         minimum_margin = min(
             min(value - lower[joint], upper[joint] - value)
             for value in q_values
@@ -314,6 +334,9 @@ def qualify_replay_artifact(
             "qd_abs_max": qd_abs_max,
             "qdd_abs_max": qdd_abs_max,
             "jerk_abs_max": jerk_abs_max,
+            "servo_target_delta_abs_max": target_delta_abs_max,
+            "servo_target_delta_abs_max_sample_index": target_delta_abs_max_sample_index,
+            "servo_target_delta_margin_rad": max_target_delta - target_delta_abs_max,
             "minimum_position_limit_margin": minimum_margin,
             "start_position": q_values[0],
             "end_position": q_values[-1],
@@ -332,6 +355,11 @@ def qualify_replay_artifact(
             failures.append(f"J{joint + 1} acceleration limit violated")
         if jerk_abs_max > max_jerk[joint] + 1e-9:
             failures.append(f"J{joint + 1} jerk limit violated")
+        if target_delta_abs_max > max_target_delta + 1e-12:
+            failures.append(
+                f"J{joint + 1} ServoCore target delta gate violated: "
+                f"{target_delta_abs_max:.9g} > {max_target_delta:.9g} rad"
+            )
         if minimum_margin < 0:
             failures.append(f"J{joint + 1} negative position-limit margin")
         if abs(q_values[0] - expected_start[joint]) > start_position_tol:
@@ -363,6 +391,7 @@ def qualify_replay_artifact(
         "sample_count": len(artifact.samples),
         "duration_s": artifact.duration_s,
         "sample_rate_hz": artifact.sample_rate_hz,
+        "maximum_servo_target_delta_rad": max_target_delta,
         "jerk_method": (
             "forward_difference_of_stored_qdd_on_fixed_artifact_grid"
         ),
@@ -374,6 +403,13 @@ def qualify_replay_artifact(
         "model_hash": artifact.metadata.get("model_hash"),
         "limits_config_file": artifact.metadata.get("limits_config_file"),
         "limits_config_hash": artifact.metadata.get("limits_config_hash"),
+        "source_provenance": artifact.metadata.get("source_provenance"),
+        "source_seed": artifact.metadata.get("source_seed"),
+        "source_accepted_attempt": artifact.metadata.get("source_accepted_attempt"),
+        "source_coefficient_file": artifact.metadata.get("source_coefficient_file"),
+        "source_coefficient_sha256": artifact.metadata.get(
+            "source_coefficient_sha256"
+        ),
         "per_joint": per_joint,
     }
 
@@ -389,6 +425,9 @@ def validate_replay_runtime_limits(
     max_qd = _six_limit(config, "maximum_command_velocity_rad_s")
     max_qdd = _six_limit(config, "maximum_command_acceleration_rad_s2")
     max_jerk = _six_limit(config, "maximum_command_jerk_rad_s3")
+    max_target_delta = float(config["maximum_servo_target_delta_rad"])
+    if not math.isfinite(max_target_delta) or max_target_delta <= 0.0:
+        raise ValueError("maximum_servo_target_delta_rad must be positive and finite")
 
     control_rate = float(config["control_rate_hz"])
     if not math.isfinite(control_rate) or control_rate <= 0:
@@ -402,9 +441,28 @@ def validate_replay_runtime_limits(
         raise ValueError(
             "control_rate_hz must exactly match frozen artifact sample_rate_hz"
         )
+    configured_duration = float(config["duration_s"])
+    if not math.isclose(
+        artifact.duration_s,
+        configured_duration,
+        rel_tol=1e-10,
+        abs_tol=1e-10,
+    ):
+        raise ValueError(
+            "duration_s must exactly match frozen artifact duration_s"
+        )
+    expected_sample_count = int(round(control_rate * configured_duration)) + 1
+    if len(artifact.samples) != expected_sample_count:
+        raise ValueError(
+            f"artifact sample_count={len(artifact.samples)} does not match fixed grid "
+            f"expectation {expected_sample_count}"
+        )
 
     dt = 1.0 / artifact.sample_rate_hz
     max_seen_jerk = [0.0] * JOINT_COUNT
+    max_seen_target_delta = [0.0] * JOINT_COUNT
+    max_seen_target_delta_sample_index = [0] * JOINT_COUNT
+    previous_q = artifact.q_start
     for sample_index, sample in enumerate(artifact.samples):
         for joint in range(JOINT_COUNT):
             if (
@@ -425,6 +483,17 @@ def validate_replay_runtime_limits(
                     f"artifact sample {sample_index} J{joint + 1} "
                     "violates acceleration limit"
                 )
+            target_delta = abs(sample.q_ref[joint] - previous_q[joint])
+            if target_delta > max_seen_target_delta[joint]:
+                max_seen_target_delta[joint] = target_delta
+                max_seen_target_delta_sample_index[joint] = sample_index
+            if target_delta > max_target_delta + 1e-12:
+                raise ValueError(
+                    f"artifact sample {sample_index} J{joint + 1} target delta "
+                    f"{target_delta:.9g} rad exceeds lower ServoCore fixed gate "
+                    f"{max_target_delta:.9g} rad"
+                )
+        previous_q = sample.q_ref
         if sample_index == 0:
             continue
         previous = artifact.samples[sample_index - 1]
@@ -448,6 +517,12 @@ def validate_replay_runtime_limits(
             "forward_difference_of_stored_qdd_on_fixed_artifact_grid"
         ),
         "jerk_abs_max": max_seen_jerk,
+        "servo_target_delta_abs_max": max_seen_target_delta,
+        "servo_target_delta_abs_max_sample_index": max_seen_target_delta_sample_index,
+        "servo_target_delta_margin_rad": [
+            max_target_delta - value for value in max_seen_target_delta
+        ],
+        "maximum_servo_target_delta_rad": max_target_delta,
     }
 
 

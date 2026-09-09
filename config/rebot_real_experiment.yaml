@@ -7,7 +7,7 @@ tcp_port: 5000
 udp_port: 5001
 
 control_mode: state_only        # state_only | servo_hold | excitation
-control_rate_hz: 100.0
+control_rate_hz: 200.0
 duration_s: 0.1
 max_samples: 5
 output_csv: data/rebot_real/hardware_experiment.csv
@@ -29,6 +29,11 @@ joint_offset_rad: [0, 0, 0, 0, 0, 0]
 joint_position_min_rad: [0.0, -3.14, -3.14, -1.87, -1.57, -3.14]
 joint_position_max_rad: [6.283185307180, 0.0, 0.0, 1.57, 1.57, 3.14]
 maximum_command_velocity_rad_s: [0.05, 0.05, 0.05, 0.05, 0.05, 0.05]
+# Independent target-to-feedback lag gate. 10 mrad is above the 2.452 mrad
+# maximum observed before the A_run02 false velocity rejection, while remaining
+# below lower safety.json measured_position_tolerance_rad=17.453293 mrad.
+maximum_tracking_error_rad: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
+maximum_servo_target_delta_rad: 0.003125
 
 # SDK MoveJ preposition parameters. These are not identification excitation limits.
 # Current values mirror wlsea_arm_sdk.movej_runtime; official identification-grade
@@ -37,10 +42,12 @@ movej_max_velocity_rad_s: [0.3141592653589793, 0.2792526803190927, 0.26179938779
 movej_max_acceleration_rad_s2: [0.6979571678725324, 0.5583308277129860, 0.6979571678725324, 0.8375835080320788, 0.8375835080320788, 1.0470230182713984]
 movej_max_jerk_rad_s3: [10.471975511965978, 10.471975511965978, 10.471975511965978, 10.471975511965978, 10.471975511965978, 10.471975511965978]
 movej_timeout_s: 60.0
+# Post-run MoveJ park is opt-in. Historical modes keep direct disable behavior.
+controlled_park_before_disable: false
 start_position_tolerance_rad: 0.01
 preposition_settle_velocity_tolerance_rad_s: 0.01
 
-maximum_feedback_age_ms: 50.0
+maximum_feedback_age_ms: 100.0
 # Optional disabled/pre-enable limit. null preserves the historical single-limit behavior.
 maximum_disabled_feedback_age_ms: null
 

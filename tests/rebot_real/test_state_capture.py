@@ -39,6 +39,14 @@ class MockState:
     primary_fault_code: int = 0
     servo_active: bool = False
     servo_mode: str = "disabled"
+    servo_last_accepted_sequence: int = 9
+    servo_target_age_ns: int = 5_000_000
+    servo_accepted_targets: int = 9
+    servo_rejected_targets: int = 1
+    servo_target_jump_rejects: int = 1
+    servo_velocity_rejects: int = 2
+    servo_acceleration_rejects: int = 3
+    servo_jerk_rejects: int = 4
 
 
 def make_sample(
@@ -73,6 +81,14 @@ class RebotStateCaptureTest(unittest.TestCase):
         self.assertEqual(sample.robot_mode, "disabled")
         self.assertEqual(sample.safety_state, "disabled")
         self.assertEqual(sample.udp_sequence, 10)
+        self.assertEqual(sample.servo_last_accepted_sequence, 9)
+        self.assertEqual(sample.servo_target_age_ns, 5_000_000)
+        self.assertEqual(sample.servo_accepted_targets, 9)
+        self.assertEqual(sample.servo_rejected_targets, 1)
+        self.assertEqual(sample.servo_target_jump_rejects, 1)
+        self.assertEqual(sample.servo_velocity_rejects, 2)
+        self.assertEqual(sample.servo_acceleration_rejects, 3)
+        self.assertEqual(sample.servo_jerk_rejects, 4)
 
     def test_six_dof_shape_rejected(self) -> None:
         state = MockState(position_rad=(0.0,) * 5)

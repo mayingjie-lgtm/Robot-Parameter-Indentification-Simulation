@@ -82,7 +82,10 @@ class RebotControlAdapter:
 
         if self._client is None:
             raise RebotControlError("ArmClient is not connected")
-        snapshot = _state_snapshot(self._client)
+        try:
+            snapshot = _state_snapshot(self._client)
+        except Exception as exc:
+            raise RebotControlError(f"latest state snapshot failed: {exc}") from exc
         if snapshot is None:
             return None
         state, host_rx_ns, version = snapshot
@@ -136,6 +139,43 @@ class RebotControlAdapter:
         if status not in (None, "done"):
             raise RebotControlError(f"configure_pvt returned unexpected status {status!r}")
 
+    def park_policy(self) -> dict[str, Any]:
+        """Return the SDK park policy mapped into runner canonical coordinates."""
+
+        client = self._require_client()
+        try:
+            policy = _load_movej_park_policy(self.sdk_root)
+        except FileNotFoundError:
+            policy = getattr(client, "movej_park_policy", None)
+            if policy is None:
+                raise RebotControlError(
+                    "SDK MoveJ park policy is unavailable and client exposes no fallback"
+                )
+            source = "mock_movej_runtime_policy"
+        else:
+            source = "sdk_movej_runtime"
+        target_sdk = _six_finite(policy["target_position_rad"], "park target_position_rad")
+        target_q = tuple(
+            self.joint_direction[index] * target_sdk[index] + self.joint_offset_rad[index]
+            for index in range(JOINT_COUNT)
+        )
+        return {
+            "source": source,
+            "target_q": target_q,
+            "max_velocity_rad_s": _six_positive(
+                policy["max_velocity_rad_s"], "park max_velocity_rad_s"
+            ),
+            "max_acceleration_rad_s2": _six_positive(
+                policy["max_acceleration_rad_s2"], "park max_acceleration_rad_s2"
+            ),
+            "max_jerk_rad_s3": _six_positive(
+                policy["max_jerk_rad_s3"], "park max_jerk_rad_s3"
+            ),
+            "position_tolerance_rad": _positive_finite(
+                policy["position_tolerance_rad"], "park position_tolerance_rad"
+            ),
+        }
+
     def enable(self) -> None:
         """Enable the lower driver through the SDK command/reply path."""
 
@@ -182,7 +222,12 @@ class RebotControlAdapter:
         self._call_reply("enter_servo", timeout_s=self.command_timeout_s)
         self._next_servo_sequence = 1
 
-    def send_servo_target(self, q_target: Sequence[float]) -> tuple[int, int]:
+    def send_servo_target(
+        self,
+        q_target: Sequence[float],
+        *,
+        host_timestamp_ns: int | None = None,
+    ) -> tuple[int, int]:
         """Send one six-axis position target with explicit timestamp and sequence.
 
         Returns ``(host_timestamp_ns, servo_sequence)`` exactly matching the values
@@ -196,7 +241,11 @@ class RebotControlAdapter:
             (q_public[index] - self.joint_offset_rad[index]) / self.joint_direction[index]
             for index in range(JOINT_COUNT)
         )
-        timestamp_ns = int(self._monotonic_ns_fn())
+        timestamp_ns = (
+            int(self._monotonic_ns_fn())
+            if host_timestamp_ns is None
+            else int(host_timestamp_ns)
+        )
         sequence = self._next_servo_sequence
         if timestamp_ns <= 0:
             raise RebotControlError("host servo timestamp must be positive")
@@ -214,6 +263,12 @@ class RebotControlAdapter:
             )
         self._next_servo_sequence += 1
         return timestamp_ns, sequence
+
+    @property
+    def next_servo_sequence(self) -> int:
+        """Return the sequence that the next Servo send will attempt."""
+
+        return self._next_servo_sequence
 
     def exit_servo(self) -> None:
         """Release lower Servo ownership through the audited SDK command."""
@@ -393,6 +448,58 @@ def _load_movej_pvt_policy(sdk_root: Path) -> dict[str, tuple[float, ...]]:
         "current_limit_normalized": _six_finite(
             module.PVT_CURRENT_LIMIT_NORMALIZED, "SDK PVT_CURRENT_LIMIT_NORMALIZED"
         ),
+    }
+
+
+def _load_movej_park_policy(sdk_root: Path) -> dict[str, tuple[float, ...] | float]:
+    """Load the authoritative park target/limits from this SDK checkout at runtime."""
+
+    if not str(sdk_root):
+        raise FileNotFoundError("sdk_root is empty; cannot load SDK MoveJ park policy")
+    sdk_root_path = sdk_root.expanduser().resolve()
+    python_roots = (sdk_root_path / "upper" / "python", sdk_root_path / "src")
+    module_path = next(
+        (
+            root / "wlsea_arm_sdk" / "movej_runtime.py"
+            for root in python_roots
+            if (root / "wlsea_arm_sdk" / "movej_runtime.py").is_file()
+        ),
+        None,
+    )
+    if module_path is None:
+        raise FileNotFoundError("SDK wlsea_arm_sdk/movej_runtime.py was not found")
+    python_root = module_path.parent.parent
+    existing = sys.modules.get("wlsea_arm_sdk.movej_runtime")
+    if existing is not None:
+        existing_path = Path(getattr(existing, "__file__", "")).resolve()
+        if existing_path != module_path.resolve():
+            raise RuntimeError(
+                "wlsea_arm_sdk.movej_runtime is already imported from a different SDK root: "
+                f"{existing_path}"
+            )
+    inserted = str(python_root) not in sys.path
+    if inserted:
+        sys.path.insert(0, str(python_root))
+    try:
+        module = importlib.import_module("wlsea_arm_sdk.movej_runtime")
+    finally:
+        if inserted:
+            try:
+                sys.path.remove(str(python_root))
+            except ValueError:
+                pass
+    return {
+        "target_position_rad": tuple(math.radians(value) for value in module.PARK_JOINT_DEG),
+        "max_velocity_rad_s": tuple(
+            math.radians(value) for value in module.PARK_MAX_VELOCITY_DEG_S
+        ),
+        "max_acceleration_rad_s2": tuple(
+            math.radians(value) for value in module.PARK_MAX_ACCELERATION_DEG_S2
+        ),
+        "max_jerk_rad_s3": tuple(
+            math.radians(value) for value in module.PARK_MAX_JERK_DEG_S3
+        ),
+        "position_tolerance_rad": math.radians(module.PARK_POSITION_TOLERANCE_DEG),
     }
 
 

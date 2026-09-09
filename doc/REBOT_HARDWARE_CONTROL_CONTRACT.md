@@ -32,7 +32,7 @@ state_only servo_hold excitation
                       (frozen replay artifact)
             |
             v
-rebot_hardware_experiment_v1 CSV
+rebot_hardware_experiment_v2 CSV
             + metadata
 ```
 
@@ -78,6 +78,7 @@ The adapter maps only public API that exists in the audited SDK:
 |---|---|---|
 | `connect()` | `ArmClient.connect()` | open UDP feedback + TCP command session |
 | `read_state()` | `ArmClient.state_store/latest_state` | read public `JointState` |
+| `latest_state` | `ArmClient.state_store.latest` | reuse the newest public state without waiting for a new UDP frame |
 | `configure_movej_pvt()` | `ArmClient.configure_pvt(...)` | apply the SDK `movej_runtime` PVT policy before preposition |
 | `enable()` | `ArmClient.enable()` | motor-changing command |
 | `movej_to(q)` | `ArmClient.movej(...)` | synchronous SDK-native preposition to the frozen artifact start |
@@ -211,9 +212,12 @@ The upper layer implements only fail-fast checks:
 - finite values;
 - explicit mapping gate;
 - configured position limits;
-- velocity-derived per-cycle command delta;
+- consecutive-target velocity-derived delta (`maximum_command_velocity_rad_s / control_rate_hz`);
+- consecutive-target lower ServoCore fixed delta (`maximum_servo_target_delta_rad`);
+- independent target-to-measured tracking error (`maximum_tracking_error_rad`, never divided by rate);
 - feedback validity;
 - feedback age;
+- upper-host UDP snapshot age against `state_timeout_s`;
 - primary fault and lower safety-state rejection;
 - Servo-active state check;
 - state/command communication timeout.
@@ -321,10 +325,18 @@ fresh disabled feedback
   -> verify q within start_position_tolerance_rad
   -> verify |qd| <= preposition_settle_velocity_tolerance_rad_s
   -> enter_servo
-  -> replay exactly the original frozen samples
+  -> wait for each non-catch-up 5 ms deadline
+  -> reuse adapter.latest_state without waiting for a new UDP frame
+  -> gate snapshot age / feedback age / fault / Servo ownership / tracking error
+  -> replay exactly the original frozen sample
 ```
 
-MoveJ is only a preposition operation. It is not appended to the frozen artifact, is not counted as an excitation command, and is not written as identification `command_valid=true` data. Metadata records a separate `preposition` block with start/target/final state and error/settle evidence.
+MoveJ is only a preposition operation. It is not appended to the frozen artifact, is not counted as an excitation command, and is not written as identification `command_valid=true` data. Metadata records a separate `preposition` block with start/target/final state and error/settle evidence. Blocking state waits remain limited to initial disabled validation, enable/Servo transitions, MoveJ settle, and cleanup/park settle; the Servo replay hot loop never calls `read_state()`.
+
+Excitation command timestamps remain on an exact fixed reference grid. Actual dispatch
+start, adjacent dispatch interval, reference/dispatch skew, intervals below the nominal
+period, and catch-up burst count are recorded independently. A late cycle delays the next
+deadline; it never causes a short-period catch-up send.
 
 This is software/Mock capability only. Real Fourier excitation remains prohibited until
 real-hardware mapping/geometry, replay-rate/limit certification and human preview
@@ -335,7 +347,7 @@ acceptance are complete.
 Schema:
 
 ```text
-rebot_hardware_experiment_v1
+rebot_hardware_experiment_v2
 ```
 
 Columns:
@@ -346,6 +358,10 @@ sample_index
 timestamp_host_rx_ns
 timestamp_lower_ns
 timestamp_host_command_ns
+actual_dispatch_timestamp_ns
+actual_dispatch_interval_ns
+reference_dispatch_skew_ns
+state_snapshot_age_ms
 servo_sequence
 
 q0..q5

@@ -29,8 +29,12 @@ def sha256(path: str | Path) -> str:
 def read_metadata(csv_path: str | Path) -> dict[str, Any]:
     path = Path(csv_path).with_suffix(".meta.yaml")
     meta = yaml.safe_load(path.read_text())
-    if not isinstance(meta, dict) or meta.get("schema_version") != "rebot_hardware_experiment_v1":
-        raise ValueError(f"{path}: expected rebot_hardware_experiment_v1 metadata")
+    supported_schemas = {
+        "rebot_hardware_experiment_v1",
+        "rebot_hardware_experiment_v2",
+    }
+    if not isinstance(meta, dict) or meta.get("schema_version") not in supported_schemas:
+        raise ValueError(f"{path}: expected supported rebot hardware experiment metadata")
     if meta.get("robot") != "rebot_dm":
         raise ValueError("only six-axis rebot_dm experiments are supported")
     for name in ("joint_direction", "joint_offset_rad"):

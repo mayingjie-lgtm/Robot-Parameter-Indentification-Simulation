@@ -13,13 +13,17 @@ from .sdk_adapter import detect_sdk_version
 from .state_capture import CaptureSample, JOINT_COUNT
 
 
-SCHEMA_VERSION = "rebot_hardware_experiment_v1"
+SCHEMA_VERSION = "rebot_hardware_experiment_v2"
 
 CSV_COLUMNS = (
     "sample_index",
     "timestamp_host_rx_ns",
     "timestamp_lower_ns",
     "timestamp_host_command_ns",
+    "actual_dispatch_timestamp_ns",
+    "actual_dispatch_interval_ns",
+    "reference_dispatch_skew_ns",
+    "state_snapshot_age_ms",
     "servo_sequence",
     *(f"q{joint}" for joint in range(JOINT_COUNT)),
     *(f"qd{joint}" for joint in range(JOINT_COUNT)),
@@ -57,6 +61,8 @@ class HardwareExperimentRecorder:
         self.sample_count = 0
         self.run_result: dict[str, Any] | None = None
         self.preposition_result: dict[str, Any] | None = None
+        self.failure_result: dict[str, Any] | None = None
+        self.shutdown_result: dict[str, Any] | None = None
         self.csv_path.parent.mkdir(parents=True, exist_ok=True)
         self._stream = self.csv_path.open("w", encoding="utf-8", newline="")
         self._writer = csv.DictWriter(self._stream, fieldnames=CSV_COLUMNS)
@@ -72,6 +78,10 @@ class HardwareExperimentRecorder:
         servo_sequence: int | None,
         command_valid: bool,
         control_mode: str,
+        actual_dispatch_timestamp_ns: int | None = None,
+        actual_dispatch_interval_ns: int | None = None,
+        reference_dispatch_skew_ns: int | None = None,
+        state_snapshot_age_ms: float | None = None,
     ) -> None:
         """Write one state sample plus the exact position-command contract fields."""
 
@@ -84,6 +94,20 @@ class HardwareExperimentRecorder:
             "timestamp_lower_ns": sample.timestamp_lower_ns,
             "timestamp_host_command_ns": (
                 "" if timestamp_host_command_ns is None else int(timestamp_host_command_ns)
+            ),
+            "actual_dispatch_timestamp_ns": (
+                ""
+                if actual_dispatch_timestamp_ns is None
+                else int(actual_dispatch_timestamp_ns)
+            ),
+            "actual_dispatch_interval_ns": (
+                "" if actual_dispatch_interval_ns is None else int(actual_dispatch_interval_ns)
+            ),
+            "reference_dispatch_skew_ns": (
+                "" if reference_dispatch_skew_ns is None else int(reference_dispatch_skew_ns)
+            ),
+            "state_snapshot_age_ms": (
+                "" if state_snapshot_age_ms is None else float(state_snapshot_age_ms)
             ),
             "servo_sequence": "" if servo_sequence is None else int(servo_sequence),
             "robot_mode": sample.robot_mode,
@@ -123,12 +147,61 @@ class HardwareExperimentRecorder:
                 metadata["joint_mapping_scope"] = self.config["joint_mapping_scope"]
             if self.preposition_result is not None:
                 metadata["preposition"] = self.preposition_result
+            if self.failure_result is not None:
+                metadata["failure"] = self.failure_result
+            if self.shutdown_result is not None:
+                metadata["shutdown"] = self.shutdown_result
+            timing = self._build_dispatch_timing_metadata()
+            if timing is not None:
+                metadata["dispatch_timing"] = timing
             self.metadata_path.write_text(
                 yaml.safe_dump(metadata, sort_keys=False, allow_unicode=True),
                 encoding="utf-8",
             )
             return metadata
         return yaml.safe_load(self.metadata_path.read_text(encoding="utf-8"))
+
+    def _build_dispatch_timing_metadata(self) -> dict[str, Any] | None:
+        """Summarize the recorded fixed-reference and actual dispatch clocks."""
+
+        if not self.csv_path.is_file():
+            return None
+        with self.csv_path.open("r", encoding="utf-8", newline="") as stream:
+            rows = [
+                row
+                for row in csv.DictReader(stream)
+                if row["control_mode"] == "excitation" and row["command_valid"] == "1"
+            ]
+        if not rows:
+            return None
+        references = [int(row["timestamp_host_command_ns"]) for row in rows]
+        dispatches = [int(row["actual_dispatch_timestamp_ns"]) for row in rows]
+        reference_intervals = [
+            current - previous for previous, current in zip(references, references[1:])
+        ]
+        dispatch_intervals = [int(row["actual_dispatch_interval_ns"]) for row in rows]
+        skews = [int(row["reference_dispatch_skew_ns"]) for row in rows]
+        period_ns = int(round(1e9 / float(self.config["control_rate_hz"])))
+        below_period_count = sum(value < period_ns for value in dispatch_intervals)
+        return {
+            "reference_timestamp_start_ns": references[0],
+            "reference_timestamp_end_ns": references[-1],
+            "reference_interval_min_ns": (
+                period_ns if not reference_intervals else min(reference_intervals)
+            ),
+            "reference_interval_max_ns": (
+                period_ns if not reference_intervals else max(reference_intervals)
+            ),
+            "actual_dispatch_start_ns": dispatches[0],
+            "actual_dispatch_end_ns": dispatches[-1],
+            "actual_dispatch_interval_min_ns": min(dispatch_intervals),
+            "actual_dispatch_interval_max_ns": max(dispatch_intervals),
+            "reference_dispatch_skew_min_ns": min(skews),
+            "reference_dispatch_skew_max_ns": max(skews),
+            "interval_below_nominal_count": below_period_count,
+            "catch_up_burst_count": below_period_count,
+            "nominal_period_ns": period_ns,
+        }
 
 
 def build_hardware_metadata(
@@ -162,16 +235,24 @@ def build_hardware_metadata(
         "allow_hardware": bool(config["allow_hardware"]),
         "allow_motion": bool(config["allow_motion"]),
         "joint_mapping_verified": bool(config["joint_mapping_verified"]),
+        "joint_mapping_scope": str(config.get("joint_mapping_scope", "servo_hold_only")),
         "j1_convention": str(config["j1_convention"]),
         "joint_direction": list(config["joint_direction"]),
         "joint_offset_rad": list(config["joint_offset_rad"]),
         "joint_position_min_rad": list(config["joint_position_min_rad"]),
         "joint_position_max_rad": list(config["joint_position_max_rad"]),
         "maximum_command_velocity_rad_s": list(config["maximum_command_velocity_rad_s"]),
+        "maximum_tracking_error_rad": list(config["maximum_tracking_error_rad"]),
+        "maximum_servo_target_delta_rad": float(
+            config["maximum_servo_target_delta_rad"]
+        ),
         "movej_max_velocity_rad_s": list(config["movej_max_velocity_rad_s"]),
         "movej_max_acceleration_rad_s2": list(config["movej_max_acceleration_rad_s2"]),
         "movej_max_jerk_rad_s3": list(config["movej_max_jerk_rad_s3"]),
         "movej_timeout_s": float(config["movej_timeout_s"]),
+        "controlled_park_before_disable": bool(
+            config.get("controlled_park_before_disable", False)
+        ),
         "start_position_tolerance_rad": float(config["start_position_tolerance_rad"]),
         "preposition_settle_velocity_tolerance_rad_s": float(
             config["preposition_settle_velocity_tolerance_rad_s"]
@@ -192,7 +273,9 @@ def build_hardware_metadata(
             "recorded when the decoded UDP state is published to StateStore"
         ),
         "timestamp_host_command_source": (
-            "upper-host time.monotonic_ns passed explicitly to ArmClient.servo_joint"
+            "host timestamp passed explicitly to ArmClient.servo_joint; excitation uses a "
+            "fixed-cadence reference grid anchored at the initial Servo hold, while other "
+            "modes use the current upper-host time.monotonic_ns"
         ),
         "q_source": (
             "SDK public JointState.position_rad mapped as q=joint_direction*q_sdk+joint_offset_rad"
@@ -223,6 +306,11 @@ def build_hardware_metadata(
             "mapping_verified_gate": True,
             "command_position_limit": True,
             "velocity_derived_delta_limit": True,
+            "servo_target_delta_limit_rad": float(
+                config["maximum_servo_target_delta_rad"]
+            ),
+            "tracking_error_limit_rad": list(config["maximum_tracking_error_rad"]),
+            "tracking_error_divided_by_control_rate": False,
             "feedback_validity": True,
             "disabled_feedback_age_limit_ms": float(
                 config["maximum_disabled_feedback_age_ms"]
@@ -266,6 +354,7 @@ def _read_sdk_safety_snapshot(sdk_root: Path | None) -> dict[str, Any] | None:
         "feedback_timeout_ms",
         "communication_failure_grace_ms",
         "measured_position_monitor_enabled",
+        "measured_position_tolerance_rad",
         "torque_monitor_enabled",
         "hot_reload_allowed",
     )

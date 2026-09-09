@@ -54,6 +54,10 @@ class HardwareExperimentRecorderTest(unittest.TestCase):
         self.assertFalse(any(column.startswith("tau_cmd") for column in CSV_COLUMNS))
         self.assertEqual(CSV_COLUMNS[0], "sample_index")
         self.assertIn("q_cmd0", CSV_COLUMNS)
+        self.assertIn("actual_dispatch_timestamp_ns", CSV_COLUMNS)
+        self.assertIn("actual_dispatch_interval_ns", CSV_COLUMNS)
+        self.assertIn("reference_dispatch_skew_ns", CSV_COLUMNS)
+        self.assertIn("state_snapshot_age_ms", CSV_COLUMNS)
         self.assertIn("command_valid", CSV_COLUMNS)
         self.assertIn("control_mode", CSV_COLUMNS)
 
@@ -125,6 +129,10 @@ class HardwareExperimentRecorderTest(unittest.TestCase):
             self.assertFalse(metadata["current_available"])
             self.assertFalse(metadata["tau_cmd_available"])
             self.assertFalse(metadata["feedback_sequence_supported"])
+            self.assertEqual(metadata["maximum_tracking_error_rad"], [0.01] * 6)
+            self.assertFalse(
+                metadata["upper_safety_gate"]["tracking_error_divided_by_control_rate"]
+            )
             self.assertEqual(metadata["hardware_acceptance"]["joint_mapping_hardware_verification"], "PENDING")
             self.assertEqual(metadata["hardware_acceptance"]["hardware_state_only_acceptance"], "PENDING")
             self.assertEqual(metadata["hardware_acceptance"]["servo_hold_hardware_acceptance"], "PENDING")

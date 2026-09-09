@@ -65,7 +65,9 @@ def test_round_trip_and_evidence(config, joint, sign, direction):
     assert fake.calls[-3:] == ["exit_servo", "disable", "close"]
     with Path(config["output_csv"]).open() as stream:
         rows = list(csv.DictReader(stream))
-    assert len(rows) == 2 * len(targets)
+    # The first Servo target is the unrecorded lifecycle hold used to arm the
+    # lower watchdog; every subsequent jog target has command+feedback rows.
+    assert len(rows) == 2 * (len(targets) - 1)
     assert rows[-1]["command_valid"] == "0"
     assert rows[-1]["q_cmd0"] == "nan"
     for phase in ("baseline", "endpoint", "returned"):

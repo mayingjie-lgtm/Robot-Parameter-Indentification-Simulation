@@ -1,7 +1,8 @@
 # Offline numerical qualification for the accepted reBot-DM Phase 5B A trajectory.
 # These are software qualification bounds, not certified real-hardware limits.
-# The 100 Hz rate is a candidate replay rate and remains subject to hardware commissioning.
-expected_sample_rate_hz: 100.0
+# Candidate rate is overridden by prepare_rebot_ab.py for each exported artifact.
+expected_sample_rate_hz: 200.0
+expected_sample_count: 6001
 sample_rate_tolerance_hz: 1.0e-8
 expected_duration_s: 30.0
 duration_tolerance_s: 1.0e-9
@@ -23,3 +24,5 @@ maximum_command_velocity_rad_s: [1.0, 1.0, 1.0, 1.5, 1.5, 1.5]
 # real-hardware runner defaults and must be re-qualified before hardware use.
 maximum_command_acceleration_rad_s2: [2.0, 2.0, 2.0, 3.0, 3.0, 3.0]
 maximum_command_jerk_rad_s3: [10.0, 10.0, 10.0, 15.0, 15.0, 15.0]
+# Lower ServoCore fixed per-packet jump gate: 0.5 rad/s * 5 ms * 1.25.
+maximum_servo_target_delta_rad: 0.003125
