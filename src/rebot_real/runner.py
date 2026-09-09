@@ -245,6 +245,7 @@ class RebotHardwareRunner:
                 self.config["trajectory_preview_acceptance"],
                 replay_artifact,
                 repo_root=self.repo_root,
+                require_hardware_acceptance=not self.mock_backend,
             )
             self.config["trajectory_hash"] = replay_artifact.sha256
             self.config["duration_s"] = replay_artifact.duration_s
@@ -300,6 +301,7 @@ class RebotHardwareRunner:
             recorder.shutdown_result = shutdown_result
             if recorder.run_result is not None:
                 recorder.run_result.update(status="aborted", error=f"{type(exc).__name__}: {exc}", cleanup_errors=cleanup_errors)
+            recorder.motion_status = "aborted"
             metadata = recorder.close()
             if cleanup_errors:
                 raise RebotControlError(
@@ -315,6 +317,7 @@ class RebotHardwareRunner:
         recorder.shutdown_result = shutdown_result
         if recorder.run_result is not None:
             recorder.run_result.update(status="aborted" if cleanup_errors else "completed", cleanup_errors=cleanup_errors)
+        recorder.motion_status = "aborted" if cleanup_errors else "completed"
         metadata = recorder.close()
         if cleanup_errors:
             raise RebotControlError(f"cleanup failures: {'; '.join(cleanup_errors)}")
@@ -598,10 +601,11 @@ class RebotHardwareRunner:
         if period_ns <= 0:
             raise RebotControlError("invalid frozen Servo reference period")
 
-        # Exact replay uses the frozen time grid for the timestamp consumed by
-        # Lower ServoCore, while wall-clock dispatch is fail-slow/non-catchup.
-        # This prevents TCP/state-read jitter from turning a smooth fixed-grid
-        # trajectory into a short-dt velocity/acceleration/jerk spike.
+        # Exact replay means exact frozen q_ref order with no resampling and no
+        # catch-up bursts. The frozen grid remains a nominal timing reference for
+        # diagnostics, but the timestamp sent to Lower must describe the real host
+        # dispatch instant. If synchronous ACK handling makes one cycle late, the
+        # next target is delayed rather than compressed into a short-dt burst.
         reference_timestamp_ns = int(initial_hold_timestamp_ns)
         previous_dispatch_timestamp_ns = int(initial_hold_timestamp_ns)
         next_deadline_ns = previous_dispatch_timestamp_ns + period_ns
@@ -644,8 +648,9 @@ class RebotHardwareRunner:
                 )
                 stage = "excitation_target_step"
                 self._validate_target_step(sample.q_ref, previous_target)
-                stage = "excitation_tracking_error"
-                self._validate_tracking_error(sample.q_ref, state.q)
+                # During excitation, q_ref-q is identification/control-quality
+                # evidence only. It is recorded in q/q_cmd and summarized offline;
+                # unlike servo_hold/joint_jog it is not a runtime abort gate.
 
                 # Re-check the hard adjacent-dispatch floor after gate evaluation.
                 # This is normally a no-op, but makes the no-catch-up invariant
@@ -659,7 +664,7 @@ class RebotHardwareRunner:
                 stage = "excitation_servo_send"
                 timestamp_ns, sequence = adapter.send_servo_target(
                     sample.q_ref,
-                    host_timestamp_ns=reference_timestamp_ns,
+                    host_timestamp_ns=actual_dispatch_timestamp_ns,
                 )
             except RebotControlError as exc:
                 failure_observed_timestamp_ns = self.monotonic_ns_fn()
@@ -1516,11 +1521,13 @@ class RebotHardwareRunner:
             "unsafe lower safety_state",
             "state timeout",
             "state snapshot",
-            "tracking error",
             "q feedback must contain six finite",
             "qd feedback must contain six finite",
             "feedback joint ",
             "lost enabled state",
+            "servo_active=",
+            "Servo send rejected",
+            "servo_joint failed",
         )
         return any(marker in message for marker in markers)
 

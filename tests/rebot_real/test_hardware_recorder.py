@@ -113,6 +113,50 @@ class HardwareExperimentRecorderTest(unittest.TestCase):
             self.assertTrue(all(math.isnan(float(row[f"q_cmd{i}"])) for i in range(6)))
             self.assertEqual(row["command_valid"], "0")
 
+    def test_excitation_tracking_metadata_records_max_p95_count_and_first_exceedance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "excitation.csv"
+            config = self._config(output)
+            config["control_mode"] = "excitation"
+            config["control_rate_hz"] = 100.0
+            config["maximum_tracking_error_rad"] = [0.01] * 6
+            recorder = HardwareExperimentRecorder(
+                output,
+                config=config,
+                repo_root=REPO_ROOT,
+                backend="rebot_sdk_mock",
+            )
+            base = [0.0, -1.0, -1.0, 0.0, 0.0, 0.0]
+            for index, error in enumerate((0.0, 0.02, 0.04)):
+                command = list(base)
+                command[3] = error
+                dispatch_ns = 1_000_000_000 + index * 10_000_000
+                recorder.record(
+                    self._sample(),
+                    q_cmd=command,
+                    timestamp_host_command_ns=dispatch_ns,
+                    actual_dispatch_timestamp_ns=dispatch_ns,
+                    actual_dispatch_interval_ns=10_000_000,
+                    reference_dispatch_skew_ns=0,
+                    state_snapshot_age_ms=1.0,
+                    servo_sequence=index + 1,
+                    command_valid=True,
+                    control_mode="excitation",
+                )
+            recorder.motion_status = "completed"
+            metadata = recorder.close()
+            quality = metadata["tracking_quality"]
+            j4 = quality["per_joint"]["J4"]
+            self.assertAlmostEqual(j4["max_abs_rad"], 0.04)
+            self.assertAlmostEqual(j4["p95_abs_rad"], 0.038)
+            self.assertEqual(j4["threshold_exceed_count"], 2)
+            self.assertEqual(j4["first_threshold_exceed_sample_index"], 1)
+            self.assertAlmostEqual(j4["first_threshold_exceed_artifact_time_s"], 0.01)
+            self.assertEqual(quality["threshold_exceed_sample_count"], 2)
+            self.assertEqual(quality["overall_max_joint"], "J4")
+            self.assertEqual(metadata["identification_data_quality"]["status"], "warning")
+            self.assertFalse(metadata["identification_data_quality"]["accepted"])
+
     def test_metadata_declares_unavailable_signals_and_pending_hardware_acceptance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "experiment.csv"

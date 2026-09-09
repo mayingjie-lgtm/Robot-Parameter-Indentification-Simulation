@@ -550,8 +550,15 @@ def write_preview_outputs(
         "review_date": None,
         "accepted_for_hardware": False,
         "notes": (
-            "Default is false. A human operator must watch the exact-command "
-            "MP4 and manually accept this exact artifact hash."
+            (
+                "Default is false. A human operator must watch the exact-command "
+                "MP4 and manually accept this exact artifact hash."
+            )
+            if report["preview_status"] == "PASS"
+            else (
+                "Numerical qualification is FAIL. Do not set accepted_for_hardware=true; "
+                "regenerate a qualifying artifact before any hardware authorization."
+            )
         ),
     }
     acceptance_path.write_text(
@@ -570,6 +577,7 @@ def validate_preview_acceptance(
     artifact: ReplayArtifact,
     *,
     repo_root: str | Path,
+    require_hardware_acceptance: bool = True,
 ) -> dict[str, Any]:
     path = Path(acceptance_path)
     if not path.is_file():
@@ -583,7 +591,7 @@ def validate_preview_acceptance(
         raise PermissionError(
             "preview acceptance hash does not match trajectory artifact"
         )
-    if parsed.get("accepted_for_hardware") is not True:
+    if require_hardware_acceptance and parsed.get("accepted_for_hardware") is not True:
         raise PermissionError(
             "preview acceptance is not accepted_for_hardware=true"
         )

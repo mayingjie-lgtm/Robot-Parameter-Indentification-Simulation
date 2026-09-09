@@ -692,9 +692,9 @@ PASS 条件：
 - Mock excitation 可从 `[0, 0, 0, 0, 0, pi/2]` 近似停放姿态开始，用 deterministic clock 完整 replay，不需要真实等待 30 s。
 
 当前软件链已经接通到 **frozen artifact -> qualification -> exact-command preview gate -> SDK MoveJ preposition -> q0 verification -> matching-hash replay**。
-仍然禁止真实六轴 excitation，因为 J1 identification-grade convention、J6 geometry、200 Hz hardware rate certification、
-acceleration/jerk 官方限值以及人工 preview acceptance 尚未完成。SDK MoveJ 只允许作为通过全部前置门禁后的 q0 预定位手段，
-不得用独立 MoveJ、手写 Python Fourier 或另外生成一份“看起来差不多”的轨迹代替/绕过 frozen replay 与 acceptance。
+2026-09-09 的 A_run03 进一步证明：公开 `ArmClient.servo_joint()` 同步等待 TCP accept/reject，实际 command dispatch 约为 100 Hz，而不是配置中的 200 Hz；旧 5 ms fixed-reference timestamp 因而累计了约 1.515 s skew。runner 现已改为发送真实 dispatch monotonic timestamp，普通 excitation tracking lag 只记录为质量证据，不再单独触发失能。
+
+100 Hz A 已从**同一组 C++ Fourier 系数直接重新评价**为 3001 点、30 s frozen artifact，未从 200 Hz CSV 抽样；但其 J4 最大相邻 target delta 为 `0.0034906093336 rad`，超过 Lower 固定 `0.003125 rad` ServoCore 单包 gate。因此 A@100 Hz 当前数值 qualification 为 **FAIL**，不得人工把 acceptance 改成 true，也不得放宽 Lower gate 绕过。仍然禁止真实六轴 excitation，直到生成满足固定 jump gate 的新 A artifact，并完成 J1/J6、硬件 limits 和 matching-hash preview acceptance。SDK MoveJ 只允许作为通过全部前置门禁后的 q0 预定位手段。
 
 ### 8.2 强制门禁：真机轨迹必须先离线可视化
 
@@ -804,7 +804,7 @@ collision/precheck result（若模型可用）
 继续前必须补齐：
 
 1. 人工观看当前 exact-command MP4，并只对 matching trajectory SHA 手工决定 acceptance；
-2. 完成 J1 identification-grade convention、J6 geometry、200 Hz replay rate 和 acceleration/jerk hardware limits 的正式确认；
+2. 完成 J1 identification-grade convention、J6 geometry、100 Hz replay timing/throughput 语义和 acceleration/jerk hardware limits 的正式确认；
 3. `joint_jog` 完成 R4 后，设计显著低幅的 trajectory C，并沿同一 frozen artifact -> preview -> acceptance -> replay 流程验证；
 4. C 通过后再冻结独立轨迹 A（training）和 B（validation），A/B 分别 preview、分别保存 hash；
 5. 实现真机专用离线预处理：时间对齐、滤波、重采样和 `qdd` 估计；
@@ -1189,7 +1189,7 @@ MoveJ 本身不是 identification artifact 的一部分，也不进入 identific
 - 已经在 q0 且静止时跳过 no-op MoveJ；
 - 每个 frozen Servo 目标做 position limit 检查；
 - 连续 `q_ref[k]-q_ref[k-1]` 同时检查 velocity-derived delta 与 ServoCore 单包固定跳变量；
-- `q_ref-q_measured` 只检查独立的 `maximum_tracking_error_rad`，该阈值不除以频率；
+- `q_ref-q_measured` 在 excitation 中记录 max/P95/阈值超限次数/首次超限位置，作为 tracking/identification-quality evidence；普通超限不单独中止轨迹；
 - 加入 acceleration/jerk 上位机门禁，不能只依赖 lower；
 - 记录每个发送的 `q_cmd`、command timestamp、sequence；
 - feedback stale / fault / servo ownership 立即 fail closed；
@@ -1257,9 +1257,9 @@ temperature numeric thresholds 等仍有未标定/禁用项，所以“lower 没
 
 ## 16.3 控制频率不能照搬仿真 1000 Hz
 
-当前 A/B artifact 与 hardware runner 的候选发送频率为 200 Hz。Servo replay 复用最新 UDP
-快照而不逐包阻塞等待新 frame，并用 `state_timeout_s` 单独限制 host snapshot age；lower 内部
-还有自己的高频控制。正式轨迹频率仍必须根据实测：
+A_run03 的真实 dispatch 证据表明，公开同步 `ArmClient.servo_joint()` 路径在当前主机/Lower 链路下实际约为 100 Hz：303 个 excitation command 的 mean dispatch interval 约 9.9996 ms，effective rate 约 100.004 Hz。配置 200 Hz 并不会让同步 ACK 路径变成真实 200 Hz；旧 5 ms synthetic timestamp 反而会持续偏离实际发送时间。
+
+因此当前 hardware replay 候选统一按 **100 Hz nominal grid / 10 ms non-catch-up floor** 重新 qualification。Servo replay 仍复用最新 UDP snapshot，不逐包阻塞等待新 frame，并用 `state_timeout_s` 单独限制 host snapshot age；Lower 内部仍有自己的高频控制。正式轨迹频率必须继续根据实测：
 
 - upper command acceptance；
 - UDP feedback rate；
@@ -1267,7 +1267,9 @@ temperature numeric thresholds 等仍有未标定/禁用项，所以“lower 没
 - feedback age；
 - Servo watchdog；
 
-选择并冻结。不能因为仿真是 1000 Hz 就要求 Python 上位机也发送 1000 Hz。
+选择并冻结。这里的 100 Hz 是当前公开同步 SDK 路径的可持续候选，不等于 Lower 控制环频率，也不意味着任何旧 200 Hz artifact 自动获得 100 Hz hardware acceptance。
+
+特别注意：采样率降低会增大同一连续 Fourier 轨迹的相邻 `q_ref` 步长。A@100 Hz 当前 J4 最大 step `0.0034906093336 rad` 已超过 Lower 固定 `0.003125 rad` gate，因此**不能**用“实际只有 100 Hz”作为直接执行旧 A 的理由；必须重新生成满足固定单包 jump gate 的 A artifact。
 
 ## 16.4 R6：冻结 A/B
 
@@ -1384,9 +1386,32 @@ timestamp_host_rx_ns
 `timestamp_lower_ns` 来自 lower 的 steady clock，不是电机硬件时间；在没有明确时钟同步
 模型时，不要直接与 upper 的 command timestamp 相减得到“网络延迟”。
 
-excitation 的 `timestamp_host_command_ns` 是传给 lower 的固定 reference timestamp，严格按
-5 ms 递增；`actual_dispatch_timestamp_ns` 是实际发送开始时刻。两者与 host receive time 在
-同一主机 monotonic 时钟域，可用于 q_cmd 跟踪与调度分析，但 q_cmd 不是辨识力矩。
+excitation 的 `timestamp_host_command_ns` 现在是**真实发送时刻**：runner 在每次 Servo dispatch 前读取 upper-host `time.monotonic_ns()`，并把该值原样传给 `ArmClient.servo_joint()`。`actual_dispatch_timestamp_ns` 记录同一实际 dispatch start，因此正常新数据两者应一致。
+
+frozen artifact 的 nominal grid 不再伪装成 command timestamp；它通过 sample index、artifact time 和 `reference_dispatch_skew_ns` 保留用于调度诊断。这样可以同时区分：nominal trajectory time、actual command dispatch time、UDP host receive time 和 lower feedback timestamp。
+
+## 17.4 运动完成与辨识数据质量必须分开
+
+`motion_status=completed` 只表示整条 frozen command sequence 在硬安全 gate 未触发的情况下执行到末尾并完成 cleanup；它**不等于**这批数据已经适合系统辨识。excitation metadata 额外保存：
+
+```text
+tracking_quality
+  per joint: max / P95 / warning threshold / exceed count / first exceed sample
+identification_data_quality
+  accepted=false by default
+  status/reason independent from motion_status
+feedback_cadence
+  actual command dispatch rate
+  host UDP publication cadence
+  lower timestamp update cadence
+  q / qd / effort update cadence
+  duplicate snapshot count
+  feedback age min/mean/P95/max
+```
+
+普通 `q_ref-q_measured` 超过 warning threshold 时允许继续收集，只把 `tracking_quality.status` 标成 warning；之后由离线 preprocessing/identification acceptance 决定样本或整次 run 是否可用。fault、通信断开、invalid/stale feedback、unexpected Servo ownership loss、hard position limit、Servo reject 等仍是立即停止条件。
+
+A_run03 的诊断例子进一步说明为什么要区分这些频率：command dispatch 约 `100.004 Hz`，host receive publication 约 `90.07 Hz`，lower timestamp/effort update 约 `10.10 Hz`，而 303 条 raw row 中有 272 次连续重复 state snapshot。不能把 command rate、UDP publish rate 和 lower feedback update rate混成一个“200 Hz”。
 
 # 18. R8：真机离线预处理
 

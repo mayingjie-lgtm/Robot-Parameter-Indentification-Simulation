@@ -108,9 +108,9 @@ class RebotHardwareRunnerTest(unittest.TestCase):
             config["maximum_feedback_age_ms"],
         )
 
-    def test_non_catchup_deadline_preserves_full_period_after_late_dispatch(self) -> None:
-        period_s = 0.005
-        for elapsed_s in (0.0065, 0.008, 0.012):
+    def test_non_catchup_deadline_preserves_100hz_period_after_late_dispatch(self) -> None:
+        period_s = 0.010
+        for elapsed_s in (0.0115, 0.014, 0.022):
             with self.subTest(elapsed_s=elapsed_s):
                 previous_dispatch_start_s = 1.0 + elapsed_s
                 deadline = RebotHardwareRunner._non_catchup_deadline(
@@ -822,7 +822,7 @@ class RebotHardwareRunnerTest(unittest.TestCase):
             )
             self.assertEqual(metadata["shutdown"]["park_status"], "completed")
 
-    def test_excitation_tracking_gate_records_complete_failure_and_fails_safe(self) -> None:
+    def test_excitation_tracking_lag_is_monitor_only_and_records_quality_summary(self) -> None:
         class InjectTrackingLag(MockArmClient):
             def servo_joint(self, *args, **kwargs):
                 reply = super().servo_joint(*args, **kwargs)
@@ -832,22 +832,32 @@ class RebotHardwareRunnerTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             config = self._excitation_config(directory)
+            artifact = load_replay_artifact(
+                config["trajectory_artifact"], config["trajectory_metadata"]
+            )
             fake = InjectTrackingLag(
                 position_rad=[0.0, 0.0, 0.0, 0.0, 0.0, math.pi / 2],
                 follow_movej_targets=True,
                 follow_servo_targets=True,
             )
-            with self.assertRaisesRegex(RebotControlError, "tracking error J4"):
-                self._runner(config, fake).run()
-            metadata = yaml.safe_load(
-                Path(config["output_csv"]).with_suffix(".meta.yaml").read_text()
+            metadata = self._runner(config, fake).run()
+            self.assertEqual(metadata["observed_sample_count"], len(artifact.samples))
+            self.assertEqual(len(fake.servo_targets), len(artifact.samples) + 1)
+            self.assertNotIn("failure", metadata)
+            self.assertEqual(metadata["motion_status"], "completed")
+            self.assertEqual(metadata["shutdown"]["strategy"], "controlled_park")
+            quality = metadata["tracking_quality"]
+            self.assertEqual(quality["status"], "warning")
+            self.assertGreater(quality["per_joint"]["J4"]["max_abs_rad"], 0.01)
+            self.assertGreaterEqual(
+                quality["per_joint"]["J4"]["threshold_exceed_count"], 1
             )
-            failure = metadata["failure"]
-            self.assertEqual(failure["stage"], "excitation_tracking_error")
-            self.assertEqual(failure["sample_index"], 1)
-            self.assertGreater(abs(failure["tracking_error_q"][3]), 0.01)
-            self.assertEqual(metadata["shutdown"]["strategy"], "fail_safe")
-            self.assertEqual(fake.calls[-3:], ["exit_servo", "disable", "close"])
+            self.assertEqual(
+                quality["per_joint"]["J4"]["first_threshold_exceed_sample_index"], 1
+            )
+            self.assertEqual(metadata["identification_data_quality"]["status"], "warning")
+            self.assertFalse(metadata["identification_data_quality"]["accepted"])
+            self.assertEqual(fake.calls[-2:], ["disable", "close"])
 
     def test_excitation_runtime_freshness_and_fault_gates_keep_fail_safe_cleanup_order(self) -> None:
         for injection, expected_error in (

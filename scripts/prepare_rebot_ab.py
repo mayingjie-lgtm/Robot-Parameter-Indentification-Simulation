@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Prepare independent frozen A/B candidates and disabled hardware templates, offline."""
 import argparse
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -10,6 +11,18 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from rebot_real.trajectory_artifact import load_replay_artifact, qualify_replay_artifact, write_preview_outputs
+
+def _renderer_env() -> dict[str, str]:
+    env = dict(os.environ)
+    if shutil.which("ffmpeg", path=env.get("PATH")):
+        return env
+    try:
+        import imageio_ffmpeg
+    except ImportError:
+        return env
+    env["REBOT_FFMPEG_BIN"] = imageio_ffmpeg.get_ffmpeg_exe()
+    return env
+
 
 SOURCES = {
     "A": (20260826, 6, "86a5481c0c2459bb6e3f01d0aee4c247f4f0ed71aa444f77b6d1458c1f7cd529"),
@@ -21,7 +34,7 @@ def prepare(
     output: Path,
     build: Path,
     render: bool = True,
-    sample_rate_hz: float = 200.0,
+    sample_rate_hz: float = 100.0,
 ):
     output, build = output.resolve(), build.resolve()
     if output.exists():
@@ -49,11 +62,26 @@ def prepare(
         report = qualify_replay_artifact(artifact, qualify)
         write_preview_outputs(report=report, report_path=run / "preview_report.yaml",
                               acceptance_path=run / "preview_acceptance.yaml", preview_mp4=run / "preview.mp4")
-        if report["preview_status"] != "PASS":
-            raise ValueError(f"{label} qualification failed: {report['failures']}")
         if render:
             subprocess.run([str(build / "rebot_trajectory_renderer"), "--input", str(artifact.path),
-                            "--output", str(run / "preview.mp4")], cwd=ROOT, check=True)
+                            "--output", str(run / "preview.mp4")], cwd=ROOT,
+                           env=_renderer_env(), check=True)
+        if report["preview_status"] != "PASS":
+            manifest["candidates"][label] = dict(
+                seed=seed,
+                accepted_attempt=attempt,
+                coefficient_sha256=coefficient_hash,
+                trajectory_sha256=artifact.sha256,
+                preview_rendered=render,
+                qualification_status="FAIL",
+                qualification_failures=list(report["failures"]),
+                accepted_for_hardware=False,
+            )
+            manifest["status"] = "blocked_by_offline_qualification"
+            (output / "manifest.yaml").write_text(
+                yaml.safe_dump(manifest, sort_keys=False)
+            )
+            raise ValueError(f"{label} qualification failed: {report['failures']}")
         smoke_template_path = (
             ROOT / "results" / "rebot_real_ab" / label / "hardware.smoke.yaml"
         )
@@ -88,7 +116,7 @@ if __name__ == "__main__":
     parser.add_argument("--output-directory", type=Path, default=ROOT / "results/rebot_real_ab")
     parser.add_argument("--build-directory", type=Path, default=ROOT / "build_rebot")
     parser.add_argument("--skip-video", action="store_true", help="headless numerical preparation only")
-    parser.add_argument("--sample-rate-hz", type=float, default=200.0)
+    parser.add_argument("--sample-rate-hz", type=float, default=100.0)
     args = parser.parse_args()
     prepare(
         args.output_directory,

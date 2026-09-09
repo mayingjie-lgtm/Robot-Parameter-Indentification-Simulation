@@ -373,6 +373,14 @@ std::string shellQuote(const std::string &value) {
   return result;
 }
 
+/** Resolve FFmpeg from PATH or an explicit offline-renderer override. */
+std::string ffmpegExecutable() {
+  const char *override_path = std::getenv("REBOT_FFMPEG_BIN");
+  return (override_path != nullptr && *override_path != '\0')
+             ? std::string(override_path)
+             : std::string("ffmpeg");
+}
+
 /** Own the FFmpeg stdin pipe and verify encoder completion. */
 class FfmpegPipe {
 public:
@@ -382,7 +390,7 @@ public:
     const std::string dimensions =
         std::to_string(options.width) + "x" + std::to_string(options.height);
     const std::string command =
-        "ffmpeg -loglevel error -nostdin " + overwrite +
+        shellQuote(ffmpegExecutable()) + " -loglevel error -nostdin " + overwrite +
         " -f rawvideo -pixel_format rgb24 -video_size " + dimensions +
         " -framerate " + std::to_string(options.fps) +
         " -i pipe:0 -vf vflip -an -c:v libx264 -preset medium -crf 18"
@@ -391,7 +399,7 @@ public:
     pipe_ = popen(command.c_str(), "w");
     if (!pipe_) {
       throw std::runtime_error(
-          "无法启动 FFmpeg，请确认 ffmpeg 已安装并位于 PATH");
+          "无法启动 FFmpeg，请确认 PATH 或 REBOT_FFMPEG_BIN 配置正确");
     }
   }
 
@@ -574,11 +582,13 @@ void preparePaths(const RenderOptions &options) {
     fs::create_directories(options.output.parent_path());
   }
 
-  const int ffmpeg_status = std::system("ffmpeg -version >/dev/null 2>&1");
+  const std::string ffmpeg_check =
+      shellQuote(ffmpegExecutable()) + " -version >/dev/null 2>&1";
+  const int ffmpeg_status = std::system(ffmpeg_check.c_str());
   if (ffmpeg_status == -1 || !WIFEXITED(ffmpeg_status) ||
       WEXITSTATUS(ffmpeg_status) != 0) {
     throw std::runtime_error(
-        "无法调用 FFmpeg，请确认 ffmpeg 已安装并位于 PATH");
+        "无法调用 FFmpeg，请确认 PATH 或 REBOT_FFMPEG_BIN 配置正确");
   }
 }
 

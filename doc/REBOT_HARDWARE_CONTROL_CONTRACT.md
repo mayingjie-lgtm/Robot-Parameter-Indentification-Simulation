@@ -214,7 +214,7 @@ The upper layer implements only fail-fast checks:
 - configured position limits;
 - consecutive-target velocity-derived delta (`maximum_command_velocity_rad_s / control_rate_hz`);
 - consecutive-target lower ServoCore fixed delta (`maximum_servo_target_delta_rad`);
-- independent target-to-measured tracking error (`maximum_tracking_error_rad`, never divided by rate);
+- target-to-measured tracking error (`maximum_tracking_error_rad`, never divided by rate): runtime gate for hold/jog, but monitor-only quality evidence during `excitation`;
 - feedback validity;
 - feedback age;
 - upper-host UDP snapshot age against `state_timeout_s`;
@@ -325,18 +325,21 @@ fresh disabled feedback
   -> verify q within start_position_tolerance_rad
   -> verify |qd| <= preposition_settle_velocity_tolerance_rad_s
   -> enter_servo
-  -> wait for each non-catch-up 5 ms deadline
+  -> wait for each non-catch-up nominal replay deadline (current hardware candidate: 10 ms / 100 Hz)
   -> reuse adapter.latest_state without waiting for a new UDP frame
-  -> gate snapshot age / feedback age / fault / Servo ownership / tracking error
+  -> gate snapshot age / feedback age / fault / Servo ownership
+  -> record q_ref-q as tracking/data-quality evidence without aborting on ordinary lag
   -> replay exactly the original frozen sample
 ```
 
 MoveJ is only a preposition operation. It is not appended to the frozen artifact, is not counted as an excitation command, and is not written as identification `command_valid=true` data. Metadata records a separate `preposition` block with start/target/final state and error/settle evidence. Blocking state waits remain limited to initial disabled validation, enable/Servo transitions, MoveJ settle, and cleanup/park settle; the Servo replay hot loop never calls `read_state()`.
 
-Excitation command timestamps remain on an exact fixed reference grid. Actual dispatch
-start, adjacent dispatch interval, reference/dispatch skew, intervals below the nominal
-period, and catch-up burst count are recorded independently. A late cycle delays the next
-deadline; it never causes a short-period catch-up send.
+The frozen artifact still defines the exact nominal reference grid and q_ref order, but
+`timestamp_host_command_ns` now records the **actual upper-host monotonic dispatch time**
+passed to `ArmClient.servo_joint()`. The nominal reference time is retained diagnostically
+through `reference_dispatch_skew_ns`; actual dispatch start/interval min/mean/P95/max,
+effective command rate, late-cycle count and catch-up count are summarized separately.
+A late cycle delays the next target; it never causes a short-period catch-up send.
 
 This is software/Mock capability only. Real Fourier excitation remains prohibited until
 real-hardware mapping/geometry, replay-rate/limit certification and human preview
@@ -407,6 +410,9 @@ Every experiment writes `<csv>.meta.yaml` including:
 - `allow_hardware` / `allow_motion`;
 - mapping status, direction, offset, J1 convention;
 - configured joint/command/freshness thresholds;
+- `motion_status` separated from `identification_data_quality`;
+- excitation tracking-quality summary (per-joint max/P95/threshold exceed count/first exceedance);
+- feedback cadence diagnostics separating command dispatch, host UDP publication and lower/signal update cadence;
 - timestamp/q/qd/effort/q_cmd source descriptions;
 - explicit Servo command fields;
 - relevant `config/safety.json` snapshot when the configured SDK is present;
@@ -500,9 +506,12 @@ reBot hardware control adapter offline    = PASS
 reBot hardware runner offline             = PASS
 Mock Servo lifecycle                      = PASS
 Mock SDK MoveJ preposition                = PASS
-Mock frozen 3001-sample exact replay      = PASS
-Mock fault injection                      = PASS
+Mock frozen exact replay semantics        = PASS
+Mock 100 Hz no-catch-up timing             = PASS
+Mock tracking monitor-only behavior        = PASS
+Mock hard-fault/stale/reject injection     = PASS
 
+A@100 Hz numerical qualification           = BLOCKED (J4 target step 0.003490609 rad > 0.003125 rad fixed gate)
 real hardware state acceptance            = PENDING
 joint mapping verification                = PENDING
 J1 convention                             = UNRESOLVED

@@ -22,6 +22,7 @@ from rebot_real.trajectory_artifact import (
     CSV_COLUMNS,
     load_replay_artifact,
     sha256_file,
+    validate_preview_acceptance,
     validate_replay_runtime_limits,
 )
 
@@ -325,19 +326,35 @@ class TrajectoryArtifactTest(unittest.TestCase):
             sleep_fn=lambda _: None,
         ).run()
 
-    def test_acceptance_false_rejected_before_client_factory(self) -> None:
+    def test_hardware_acceptance_false_is_rejected_by_default_validator(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             fixture = ReplayFixture(directory)
             fixture.write_preview_evidence(accepted=False)
-            factory_calls = []
-
-            def factory(**kwargs):
-                factory_calls.append(kwargs)
-                return MockArmClient(**kwargs)
-
+            artifact = load_replay_artifact(fixture.artifact, fixture.metadata)
             with self.assertRaisesRegex(PermissionError, "preview acceptance is not"):
-                self._run_replay(fixture, factory=factory)
-            self.assertEqual(factory_calls, [])
+                validate_preview_acceptance(
+                    fixture.acceptance,
+                    artifact,
+                    repo_root=REPO_ROOT,
+                )
+
+    def test_mock_replay_allows_unaccepted_preview_after_hash_and_report_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = ReplayFixture(directory)
+            fixture.write_preview_evidence(accepted=False)
+            fake = MockArmClient(
+                follow_movej_targets=True,
+                follow_servo_targets=True,
+            )
+            metadata = self._run_replay(fixture, factory=lambda **_: fake)
+            self.assertEqual(metadata["motion_status"], "completed")
+            self.assertEqual(metadata["observed_sample_count"], 3)
+            timing = metadata["dispatch_timing"]
+            self.assertEqual(timing["nominal_period_ns"], 10_000_000)
+            self.assertEqual(timing["nominal_rate_hz"], 100.0)
+            self.assertGreaterEqual(timing["actual_dispatch_interval_min_ns"], 10_000_000)
+            self.assertEqual(timing["catch_up_burst_count"], 0)
+            self.assertEqual(timing["command_dispatch_timestamp_mismatch_count"], 0)
 
     def test_acceptance_hash_mismatch_rejected_before_client_factory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
