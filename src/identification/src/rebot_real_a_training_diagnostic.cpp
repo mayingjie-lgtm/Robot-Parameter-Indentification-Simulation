@@ -189,6 +189,29 @@ void writeIndexList(std::ofstream &out, const std::string &key,
   out << "]\n";
 }
 
+void writeVector(std::ofstream &out, const std::string &key,
+                 const Eigen::VectorXd &values, const std::string &indent) {
+  out << indent << key << ": [";
+  for (Eigen::Index i = 0; i < values.size(); ++i) {
+    if (i) out << ", ";
+    out << values(i);
+  }
+  out << "]\n";
+}
+
+void writeMatrix(std::ofstream &out, const std::string &key,
+                 const Eigen::MatrixXd &values, const std::string &indent) {
+  out << indent << key << ":\n";
+  for (Eigen::Index row = 0; row < values.rows(); ++row) {
+    out << indent << "  - [";
+    for (Eigen::Index column = 0; column < values.cols(); ++column) {
+      if (column) out << ", ";
+      out << values(row, column);
+    }
+    out << "]\n";
+  }
+}
+
 void writeRank(std::ofstream &out, const std::string &name,
                const RankDiagnostic &diagnostic) {
   out << "  " << name << ":\n";
@@ -341,6 +364,16 @@ int main(int argc, char **argv) {
     }
     out << "]\n";
     out << "  prediction_file: " << std::quoted(prediction_output.string()) << "\n";
+    out << "  solver: OLS\n";
+    writeVector(out, "column_scales", space.scales, "  ");
+    writeVector(out, "singular_values", space.singular_values, "  ");
+    writeMatrix(out, "base_directions", space.directions, "  ");
+    writeVector(out, "beta_hat", beta, "  ");
+    out << "  parameter_names:\n";
+    for (const auto &name : regressor.getParameterNames(
+             MuJoCoParamFlags::ALL_WITH_FRICTION)) {
+      out << "    - " << std::quoted(name) << "\n";
+    }
 
     predictions << std::setprecision(17)
                 << "time,joint,effort_filtered,effort_predicted,residual,included\n";

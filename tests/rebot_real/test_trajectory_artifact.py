@@ -28,6 +28,7 @@ from rebot_real.trajectory_artifact import (
     sha256_file,
     validate_preview_acceptance,
     validate_replay_runtime_limits,
+    write_preview_outputs,
 )
 
 Q0 = [0.0, -1.0, -1.0, 0.0, 0.0, -0.6]
@@ -493,6 +494,61 @@ class TrajectoryArtifactTest(unittest.TestCase):
             mock_backend=True,
             sleep_fn=lambda _: None,
         ).run()
+
+    def test_preview_outputs_bind_git_model_config_and_visualization_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = ReplayFixture(directory)
+            artifact = load_replay_artifact(fixture.artifact, fixture.metadata)
+            fixture.mp4.write_bytes(b"preview bytes")
+            report = {
+                "schema_version": "rebot_trajectory_preview_report_v2",
+                "trajectory_replay_mode": TRAJECTORY_REPLAY_MODE,
+                "trajectory_sha256": artifact.sha256,
+                "preview_status": "PASS",
+                "continuous_quintic_collision_precheck": "PASS",
+                "trajectory_metadata_sha256": "1" * 64,
+                "git_head_at_preview": "abc123",
+                "model_hash": "2" * 64,
+                "limits_config_hash": "3" * 64,
+                "qualification_config_sha256": "4" * 64,
+                "preview_visualization": {
+                    "preposition_method": "sdk_movej_semantic_minimum_jerk_visual_only",
+                    "preposition_not_part_of_frozen_excitation": True,
+                    "excitation_source": "exact frozen q_ref/qd_ref/qdd_ref artifact",
+                },
+            }
+            write_preview_outputs(
+                report=report,
+                report_path=fixture.report,
+                acceptance_path=fixture.acceptance,
+                preview_mp4=fixture.mp4,
+            )
+            acceptance = yaml.safe_load(fixture.acceptance.read_text())
+            self.assertFalse(acceptance["accepted_for_hardware"])
+            for key in (
+                "trajectory_metadata_sha256",
+                "git_head_at_preview",
+                "model_hash",
+                "limits_config_hash",
+                "qualification_config_sha256",
+                "preview_visualization",
+            ):
+                self.assertEqual(acceptance[key], report[key])
+            validate_preview_acceptance(
+                fixture.acceptance,
+                artifact,
+                repo_root=REPO_ROOT,
+                require_hardware_acceptance=False,
+            )
+            acceptance["model_hash"] = "9" * 64
+            fixture.acceptance.write_text(yaml.safe_dump(acceptance, sort_keys=False))
+            with self.assertRaisesRegex(PermissionError, "model_hash does not match report"):
+                validate_preview_acceptance(
+                    fixture.acceptance,
+                    artifact,
+                    repo_root=REPO_ROOT,
+                    require_hardware_acceptance=False,
+                )
 
     def test_hardware_acceptance_false_is_rejected_by_default_validator(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -1696,8 +1696,11 @@ position-only ArmClient.servo_joint(q_target)
 
 不要在 Python runner 中重新实现一套 Fourier 方程，也不要为视频单独生成第二条数学上“类似”的
 轨迹。预览、数值检查和真机发送必须共享同一份冻结 artifact；只有这样“软件里看到的动作”才是
-准备部署到真机的动作。`trajectory_preview.mp4` 只表示 **SDK MoveJ 已完成后，从 frozen q0 开始的 30 s exact-command excitation**；
-MoveJ 本身不是 identification artifact 的一部分，也不进入 identification dataset。
+准备部署到真机的动作。当前正式 preview 可以在 exact frozen excitation 前增加
+`sdk_movej_semantic_minimum_jerk_visual_only` 段，用最近一次确认的 parked pose 作为视觉起点，表达
+“当前姿态 -> SDK MoveJ 预定位 -> frozen q0 -> settle”的语义；该段**不声称逐点复现 SDK MoveJ 内部轨迹**。
+真正的 exact-command source 仍从 frozen q0 开始，excitation 段逐点来自同一冻结 artifact；MoveJ 本身不是
+identification artifact 的一部分，也不进入 identification dataset。
 
 ## 15.2 当前必须完成的软件门禁
 
@@ -1876,6 +1879,12 @@ B 不得用于：
 - 修改模型结构。
 
 这些选择应在 C 和 A 上冻结后，再只跑一次正式 B 评价。
+
+A 的离线 acceptance 只有达到 `A_ACCEPT` 或 `A_ACCEPT_WITH_WARNINGS` 后，才允许序列化
+`A_MODEL_FREEZE.yaml` 并固定其 SHA-256。freeze 必须保存 preprocessing、parameter ordering、rank tolerance、
+friction threshold、solver、`column_scales`、`base_directions` 与 `beta_hat`，并显式记录
+`derived_from: A_ONLY`、`b_inspected_for_tuning: false`。只有完成该 freeze 后才能暴露 independent B：
+**B 可以评价 frozen A，但绝不能反向调 frozen A 的 preprocessing/rank/friction/solver/model settings。**
 
 # 17. R7：正式 A/B 原始数据采集
 

@@ -922,6 +922,12 @@ def write_preview_outputs(
         "schema_version": "rebot_trajectory_preview_acceptance_v2",
         "trajectory_sha256": report["trajectory_sha256"],
         "trajectory_replay_mode": TRAJECTORY_REPLAY_MODE,
+        "trajectory_metadata_sha256": report.get("trajectory_metadata_sha256"),
+        "git_head_at_preview": report.get("git_head_at_preview"),
+        "model_hash": report.get("model_hash"),
+        "limits_config_hash": report.get("limits_config_hash"),
+        "qualification_config_sha256": report.get("qualification_config_sha256"),
+        "preview_visualization": report.get("preview_visualization"),
         "preview_report": str(report_path),
         "preview_report_sha256": sha256_file(report_path),
         "preview_mp4": str(preview_mp4),
@@ -1019,4 +1025,14 @@ def validate_preview_acceptance(
         raise PermissionError("preview report continuous collision precheck is not PASS")
     if report.get("preview_status") != "PASS":
         raise PermissionError("preview report is not PASS")
+    for key in (
+        "trajectory_metadata_sha256",
+        "git_head_at_preview",
+        "model_hash",
+        "limits_config_hash",
+        "qualification_config_sha256",
+        "preview_visualization",
+    ):
+        if key in parsed and parsed.get(key) != report.get(key):
+            raise PermissionError(f"preview acceptance {key} does not match report")
     return parsed

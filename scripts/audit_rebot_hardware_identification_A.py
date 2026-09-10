@@ -7,6 +7,7 @@ import csv
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 import numpy as np
 import yaml
@@ -254,6 +255,110 @@ def rank_summary(diagnostic: dict) -> dict:
     }
 
 
+def build_model_freeze(
+    *,
+    raw: Path,
+    raw_meta: dict,
+    processed_path: Path,
+    processed_meta: dict,
+    diagnostic: dict,
+    acceptance_path: Path,
+) -> dict:
+    fit = diagnostic.get("training_fit") or {}
+    required = {
+        "parameter_layout_columns",
+        "rank_relative_tolerance",
+        "base_rank",
+        "friction_velocity_threshold_rad_s",
+        "solver",
+        "column_scales",
+        "base_directions",
+        "beta_hat",
+        "parameter_names",
+    }
+    missing = required - set(fit)
+    if missing:
+        raise ValueError(f"diagnostic is missing freeze fields: {sorted(missing)}")
+    columns = int(fit["parameter_layout_columns"])
+    base_rank = int(fit["base_rank"])
+    scales = fit["column_scales"]
+    directions = fit["base_directions"]
+    beta = fit["beta_hat"]
+    names = fit["parameter_names"]
+    if columns != 78 or len(scales) != columns or len(names) != columns:
+        raise ValueError("A freeze requires the fixed 78-column parameter layout")
+    if len(directions) != columns or any(len(row) != base_rank for row in directions):
+        raise ValueError("A base_directions shape does not match 78 x base_rank")
+    if len(beta) != base_rank:
+        raise ValueError("A beta_hat size does not match base_rank")
+    if fit["solver"] != "OLS":
+        raise ValueError("A freeze solver must remain OLS")
+    if diagnostic.get("acceleration_source") != "qdd_est":
+        raise ValueError("A freeze acceleration source must remain qdd_est")
+    if diagnostic.get("torque_source") != "effort_filtered" or diagnostic.get("torque_calibrated") is not False:
+        raise ValueError("A freeze torque semantics changed")
+
+    model = repo_path(diagnostic["model_file"])
+    settings = processed_meta["settings"]
+    return {
+        "schema_version": "rebot_a_model_freeze_v1",
+        "source_a_run": str(raw.parent),
+        "source_raw_sha256": sha256(raw),
+        "source_raw_metadata_sha256": sha256(raw.with_suffix(".meta.yaml")),
+        "source_processed_sha256": sha256(processed_path),
+        "source_processed_metadata_sha256": sha256(processed_path.with_suffix(".meta.yaml")),
+        "source_acceptance_sha256": sha256(acceptance_path),
+        "trajectory_hash": raw_meta.get("trajectory_hash"),
+        "data_semantics": {
+            "data_mode": diagnostic["data_mode"],
+            "acceleration_source": diagnostic["acceleration_source"],
+            "torque_source": diagnostic["torque_source"],
+            "torque_calibrated": diagnostic["torque_calibrated"],
+        },
+        "preprocessing": {
+            "cutoff_hz": float(settings["cutoff_hz"]),
+            "filter_order": int(settings["filter_order"]),
+            "edge_trim_s": float(settings["edge_trim_s"]),
+            "resample_rate_hz": float(processed_meta["resample_rate_hz"]),
+            "gap_periods": float(settings["gap_periods"]),
+        },
+        "model": {
+            "model_file": str(model),
+            "model_sha256": sha256(model),
+            "parameter_layout_columns": columns,
+            "parameter_names": names,
+        },
+        "rank": {
+            "rank_relative_tolerance": float(fit["rank_relative_tolerance"]),
+            "base_rank": base_rank,
+            "column_scales": scales,
+            "base_directions": directions,
+        },
+        "friction": {
+            "velocity_threshold_rad_s": float(fit["friction_velocity_threshold_rad_s"]),
+        },
+        "solver": {"type": fit["solver"]},
+        "fit": {
+            "beta_hat": beta,
+            "training_diagnostic_only": True,
+        },
+        "freeze": {
+            "frozen": True,
+            "derived_from": "A_ONLY",
+            "b_inspected_for_tuning": False,
+        },
+    }
+
+
+def write_model_freeze(path: Path, payload: dict, *, overwrite: bool = False) -> str:
+    if path.exists() and not overwrite:
+        raise FileExistsError(f"model freeze output already exists: {path}")
+    path.write_text(
+        yaml.safe_dump(payload, sort_keys=False, allow_unicode=True), encoding="utf-8"
+    )
+    return sha256(path)
+
+
 def determine_acceptance(pre: dict, diagnostic: dict, quality: dict):
     blockers, warnings = [], []
     excluded = pre.get("excluded_counts", {})
@@ -390,6 +495,94 @@ def write_report(path: Path, acceptance: dict) -> None:
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def freeze_existing_a(
+    *, raw: Path, output: Path, binary: Path, model: Path, overwrite: bool
+) -> int:
+    acceptance_path = output / "acceptance.yaml"
+    processed_path = output / "A.processed.csv"
+    processed_meta_path = output / "A.processed.meta.yaml"
+    old_diagnostic_path = output / "A.training_diagnostic.yaml"
+    old_prediction_path = output / "A.training_prediction.csv"
+    for path in (
+        acceptance_path,
+        processed_path,
+        processed_meta_path,
+        old_diagnostic_path,
+        old_prediction_path,
+    ):
+        if not path.is_file():
+            raise FileNotFoundError(f"existing A audit artifact is missing: {path}")
+
+    acceptance = yaml.safe_load(acceptance_path.read_text())
+    if acceptance.get("identification_acceptance", {}).get("status") not in {
+        "A_ACCEPT", "A_ACCEPT_WITH_WARNINGS"
+    }:
+        raise ValueError("A model/settings may be frozen only after A acceptance")
+    raw_meta = read_metadata(raw)
+    if sha256(raw) != acceptance.get("raw_csv_sha256"):
+        raise ValueError("frozen A raw hash no longer matches acceptance")
+    if sha256(raw.with_suffix(".meta.yaml")) != acceptance.get("raw_metadata_sha256"):
+        raise ValueError("frozen A raw metadata hash no longer matches acceptance")
+
+    processed_meta = yaml.safe_load(processed_meta_path.read_text())
+    if processed_meta.get("raw_sha256") != sha256(raw):
+        raise ValueError("existing processed A does not match accepted raw A")
+    if processed_meta.get("processed_sha256") != sha256(processed_path):
+        raise ValueError("existing processed A hash no longer matches its metadata")
+
+    old_diagnostic = yaml.safe_load(old_diagnostic_path.read_text())
+    old_fit = old_diagnostic.get("training_fit") or {}
+    frozen_rank_tolerance = float(old_fit["rank_relative_tolerance"])
+    frozen_friction_threshold = float(old_fit["friction_velocity_threshold_rad_s"])
+    old_ranks = rank_summary(old_diagnostic)
+    processed = load_processed(processed_path)
+    old_rmse = fit_metrics(processed, old_prediction_path)["aggregate"]["rmse"]
+
+    with tempfile.TemporaryDirectory(prefix="rebot_a_freeze_") as directory:
+        temporary = Path(directory)
+        new_diagnostic_path = temporary / "A.training_diagnostic.yaml"
+        new_prediction_path = temporary / "A.training_prediction.csv"
+        subprocess.run(
+            [
+                str(binary), "--input", str(processed_path), "--model", str(model),
+                "--output", str(new_diagnostic_path),
+                "--prediction-output", str(new_prediction_path),
+                "--rank-relative-tolerance", str(frozen_rank_tolerance),
+                "--friction-velocity-threshold", str(frozen_friction_threshold),
+            ],
+            cwd=ROOT, check=True,
+        )
+        new_diagnostic = yaml.safe_load(new_diagnostic_path.read_text())
+        new_rmse = fit_metrics(processed, new_prediction_path)["aggregate"]["rmse"]
+        new_prediction_sha = sha256(new_prediction_path)
+        if old_prediction_path.read_bytes() != new_prediction_path.read_bytes():
+            raise RuntimeError("serialization-only regression changed A prediction bytes")
+        if rank_summary(new_diagnostic) != old_ranks:
+            raise RuntimeError("serialization-only regression changed A rank diagnostics")
+        if new_rmse != old_rmse:
+            raise RuntimeError("serialization-only regression changed A training RMSE")
+
+    payload = build_model_freeze(
+        raw=raw,
+        raw_meta=raw_meta,
+        processed_path=processed_path,
+        processed_meta=processed_meta,
+        diagnostic=new_diagnostic,
+        acceptance_path=acceptance_path,
+    )
+    freeze_path = output / "A_MODEL_FREEZE.yaml"
+    freeze_sha = write_model_freeze(freeze_path, payload, overwrite=overwrite)
+    print(f"old_prediction_sha256={sha256(old_prediction_path)}")
+    print(f"new_prediction_sha256={new_prediction_sha}")
+    print(f"old_training_rmse={old_rmse:.17g}")
+    print(f"new_training_rmse={new_rmse:.17g}")
+    print(f"rank_60_72_78={EXPECTED_RANKS['rank_60']}/{EXPECTED_RANKS['rank_72']}/{EXPECTED_RANKS['rank_78']}")
+    print(f"model_freeze={freeze_path}")
+    print(f"model_freeze_sha256={freeze_sha}")
+    print("freeze_source=A_ONLY; b_inspected_for_tuning=false")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--raw-csv", required=True)
@@ -399,6 +592,11 @@ def main() -> int:
     parser.add_argument("--rank-relative-tolerance", type=float, default=1e-6)
     parser.add_argument("--friction-velocity-threshold", type=float, default=0.01)
     parser.add_argument("--reuse-existing", action="store_true")
+    parser.add_argument(
+        "--freeze-existing-only",
+        action="store_true",
+        help="freeze an already accepted A audit without regenerating its accepted artifacts",
+    )
     args = parser.parse_args()
 
     print("OFFLINE_ONLY")
@@ -406,6 +604,16 @@ def main() -> int:
     output = repo_path(args.output_directory)
     binary = repo_path(args.diagnostic_binary)
     model = repo_path(args.model)
+    if args.freeze_existing_only:
+        if not output.is_dir():
+            raise FileNotFoundError(f"existing A audit directory is missing: {output}")
+        return freeze_existing_a(
+            raw=raw,
+            output=output,
+            binary=binary,
+            model=model,
+            overwrite=args.reuse_existing,
+        )
     raw_meta = read_metadata(raw)
     raw_hash_before = sha256(raw)
     raw_meta_hash_before = sha256(raw.with_suffix(".meta.yaml"))
@@ -547,6 +755,20 @@ def main() -> int:
         yaml.safe_dump(acceptance, sort_keys=False, allow_unicode=True), encoding="utf-8"
     )
     write_report(report_path, acceptance)
+    freeze_path = output / "A_MODEL_FREEZE.yaml"
+    freeze_sha = None
+    if status != "A_REJECT":
+        freeze_payload = build_model_freeze(
+            raw=raw,
+            raw_meta=raw_meta,
+            processed_path=processed_path,
+            processed_meta=pre,
+            diagnostic=diagnostic,
+            acceptance_path=acceptance_path,
+        )
+        freeze_sha = write_model_freeze(
+            freeze_path, freeze_payload, overwrite=args.reuse_existing
+        )
 
     raw_hash_after = sha256(raw)
     raw_meta_hash_after = sha256(raw.with_suffix(".meta.yaml"))
@@ -559,6 +781,9 @@ def main() -> int:
     print(f"raw_metadata_sha256_after={raw_meta_hash_after}")
     print(f"acceptance={acceptance_path}")
     print(f"report={report_path}")
+    if freeze_sha is not None:
+        print(f"model_freeze={freeze_path}")
+        print(f"model_freeze_sha256={freeze_sha}")
     return 0
 
 

@@ -39,6 +39,10 @@ struct RenderOptions {
   double playback_speed = 1.0;
   std::optional<double> start_time;
   std::optional<double> duration;
+  std::optional<std::array<double, kDof>> preposition_start_q;
+  double preposition_duration_s = 10.0;
+  double preposition_settle_s = 1.0;
+  double end_hold_s = 1.0;
   bool overwrite = false;
 };
 
@@ -74,6 +78,10 @@ void printUsage() {
          "(default: 1)\n"
       << "  --start-time <seconds>    Absolute CSV time at which to start\n"
       << "  --duration <seconds>      Simulation-time duration to render\n"
+      << "  --preposition-start-q <q1,...,q6>  Add SDK MoveJ semantic visual preposition\n"
+      << "  --preposition-duration <seconds>   Semantic preposition duration (default: 10)\n"
+      << "  --preposition-settle <seconds>     Hold at q0 before excitation (default: 1)\n"
+      << "  --end-hold <seconds>               Hold final excitation pose (default: 1)\n"
       << "  --overwrite               Replace an existing output file\n"
       << "  --help                    Show this message\n";
 }
@@ -102,6 +110,24 @@ double parseDouble(const std::string &text, const std::string &name) {
 }
 
 /** Parse a positive integer command-line value. */
+std::array<double, kDof> parseJointVector(const std::string &text,
+                                           const std::string &name) {
+  std::array<double, kDof> values{};
+  std::stringstream stream(text);
+  std::string token;
+  std::size_t index = 0;
+  while (std::getline(stream, token, ',')) {
+    if (index >= kDof) {
+      throw std::runtime_error(name + " 必须正好包含 6 个逗号分隔数值");
+    }
+    values[index++] = parseDouble(token, name);
+  }
+  if (index != kDof) {
+    throw std::runtime_error(name + " 必须正好包含 6 个逗号分隔数值");
+  }
+  return values;
+}
+
 int parsePositiveInteger(const std::string &text, const std::string &name) {
   std::size_t parsed = 0;
   long value = 0;
@@ -145,6 +171,18 @@ RenderOptions parseOptions(int argc, char **argv) {
     } else if (argument == "--duration") {
       options.duration =
           parseDouble(requireArgumentValue(argc, argv, index), "--duration");
+    } else if (argument == "--preposition-start-q") {
+      options.preposition_start_q = parseJointVector(
+          requireArgumentValue(argc, argv, index), "--preposition-start-q");
+    } else if (argument == "--preposition-duration") {
+      options.preposition_duration_s = parseDouble(
+          requireArgumentValue(argc, argv, index), "--preposition-duration");
+    } else if (argument == "--preposition-settle") {
+      options.preposition_settle_s = parseDouble(
+          requireArgumentValue(argc, argv, index), "--preposition-settle");
+    } else if (argument == "--end-hold") {
+      options.end_hold_s = parseDouble(
+          requireArgumentValue(argc, argv, index), "--end-hold");
     } else if (argument == "--overwrite") {
       options.overwrite = true;
     } else if (argument == "--help") {
@@ -163,6 +201,16 @@ RenderOptions parseOptions(int argc, char **argv) {
   }
   if (options.duration && *options.duration <= 0.0) {
     throw std::runtime_error("--duration 必须大于 0");
+  }
+  if (options.preposition_start_q) {
+    if (options.start_time || options.duration) {
+      throw std::runtime_error(
+          "preposition preview 必须渲染完整 frozen trajectory，不能同时裁剪时间");
+    }
+    if (options.preposition_duration_s <= 0.0 ||
+        options.preposition_settle_s < 0.0 || options.end_hold_s < 0.0) {
+      throw std::runtime_error("preposition/settle/end-hold 时间参数无效");
+    }
   }
   if (options.width % 2 != 0 || options.height % 2 != 0) {
     throw std::runtime_error("--width 和 --height 必须是正偶数");
@@ -623,6 +671,21 @@ void preparePaths(const RenderOptions &options) {
   }
 }
 
+/** Smooth zero-velocity/acceleration joint-space transition for MoveJ semantics only. */
+std::array<double, kDof> semanticPrepositionPosition(
+    const std::array<double, kDof> &start,
+    const std::array<double, kDof> &target, double ratio) {
+  const double s = std::clamp(ratio, 0.0, 1.0);
+  const double s2 = s * s;
+  const double s3 = s2 * s;
+  const double blend = 10.0 * s3 - 15.0 * s3 * s + 6.0 * s3 * s2;
+  std::array<double, kDof> result{};
+  for (std::size_t joint = 0; joint < kDof; ++joint) {
+    result[joint] = start[joint] + blend * (target[joint] - start[joint]);
+  }
+  return result;
+}
+
 /** Render the selected trajectory interval and encode all frames. */
 void renderVideo(const RenderOptions &options,
                  const TrajectoryData &trajectory) {
@@ -639,11 +702,17 @@ void renderVideo(const RenderOptions &options,
       clip_end <= clip_begin) {
     throw std::runtime_error("请求的渲染区间超出 CSV 时间范围");
   }
+  if (options.preposition_start_q &&
+      trajectory.schema != TrajectorySchema::ReplayActualTimeQuintic) {
+    throw std::runtime_error("preposition preview 仅支持 frozen replay schema");
+  }
 
-  const double video_duration =
-      (clip_end - clip_begin) / options.playback_speed;
-  // Recorded 1 kHz timestamps accumulate tiny binary error; keep an exact
-  // 30 s, 60 fps trajectory at 1800 frames instead of creating a spurious one.
+  const double excitation_duration = clip_end - clip_begin;
+  const double preview_duration = options.preposition_start_q
+      ? options.preposition_duration_s + options.preposition_settle_s +
+            excitation_duration + options.end_hold_s
+      : excitation_duration;
+  const double video_duration = preview_duration / options.playback_speed;
   const double nominal_frame_count = video_duration * options.fps;
   const std::size_t frame_count = std::max<std::size_t>(
       1, static_cast<std::size_t>(std::ceil(nominal_frame_count - 1e-9)));
@@ -655,11 +724,31 @@ void renderVideo(const RenderOptions &options,
   const std::size_t progress_interval =
       static_cast<std::size_t>(options.fps) * 5;
   for (std::size_t frame = 0; frame < frame_count; ++frame) {
-    const double simulation_time =
-        std::min(clip_end, clip_begin + static_cast<double>(frame) *
-                                            options.playback_speed /
-                                            static_cast<double>(options.fps));
-    renderer.render(positionAt(trajectory, simulation_time), rgb);
+    const double preview_time = std::min(
+        preview_duration,
+        static_cast<double>(frame) * options.playback_speed /
+            static_cast<double>(options.fps));
+    std::array<double, kDof> position{};
+    if (!options.preposition_start_q) {
+      const double trajectory_time = std::min(clip_end, clip_begin + preview_time);
+      position = positionAt(trajectory, trajectory_time);
+    } else if (preview_time < options.preposition_duration_s) {
+      position = semanticPrepositionPosition(
+          *options.preposition_start_q, points.front().position,
+          preview_time / options.preposition_duration_s);
+    } else if (preview_time <
+               options.preposition_duration_s + options.preposition_settle_s) {
+      position = points.front().position;
+    } else {
+      const double excitation_time =
+          preview_time - options.preposition_duration_s -
+          options.preposition_settle_s;
+      position = excitation_time <= excitation_duration
+          ? positionAt(trajectory,
+                       std::min(clip_end, clip_begin + excitation_time))
+          : points.back().position;
+    }
+    renderer.render(position, rgb);
     encoder.writeFrame(rgb);
     if ((frame + 1) % progress_interval == 0 || frame + 1 == frame_count) {
       std::cout << "Rendered " << (frame + 1) << "/" << frame_count
@@ -674,8 +763,13 @@ void renderVideo(const RenderOptions &options,
             << "preview_mode="
             << (trajectory.schema == TrajectorySchema::ReplayActualTimeQuintic
                     ? "actual_time_quintic_v1_continuous_path"
-                    : "dynamic_simulation_actual_q")
-            << std::endl;
+                    : "dynamic_simulation_actual_q") << "\n";
+  if (options.preposition_start_q) {
+    std::cout
+        << "preposition_mode=sdk_movej_semantic_minimum_jerk_visual_only\n"
+        << "preposition_not_part_of_frozen_excitation=true\n"
+        << "excitation_uses_exact_frozen_q_qd_qdd=true\n";
+  }
 }
 
 } // namespace
