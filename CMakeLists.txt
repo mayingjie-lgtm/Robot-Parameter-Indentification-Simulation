@@ -325,6 +325,14 @@ target_compile_definitions(rebot_excitation_data_quality
   PRIVATE PROJECT_ROOT_DIR="${PROJECT_ROOT_DIR}"
 )
 
+add_executable(rebot_real_a_training_diagnostic
+  src/identification/src/rebot_real_a_training_diagnostic.cpp
+)
+target_link_libraries(rebot_real_a_training_diagnostic PRIVATE identification_core)
+target_compile_definitions(rebot_real_a_training_diagnostic
+  PRIVATE PROJECT_ROOT_DIR="${PROJECT_ROOT_DIR}"
+)
+
 add_executable(rebot_constraint_force_diagnostic
   src/identification/src/rebot_constraint_force_diagnostic.cpp
 )

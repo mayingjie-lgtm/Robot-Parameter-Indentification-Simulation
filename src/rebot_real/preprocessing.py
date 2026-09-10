@@ -75,9 +75,18 @@ def preprocess(csv_path: str | Path, output: str | Path, *, options: dict | None
         raise FileExistsError(f"processed output already exists: {output}")
     meta = read_metadata(csv_path)
     settings = _settings(options)
-    age_limit = float(meta["maximum_feedback_age_ms"])
+    # v3 excitation data explicitly defines lower_feedback_timeout_ms as the
+    # measurement-usability freshness bound. maximum_feedback_age_ms is only a
+    # deprecated pre-motion compatibility alias there; older recordings may not
+    # have the lower timeout and keep the legacy fallback.
+    age_limit_source = (
+        "lower_feedback_timeout_ms"
+        if "lower_feedback_timeout_ms" in meta
+        else "maximum_feedback_age_ms"
+    )
+    age_limit = float(meta[age_limit_source])
     if not np.isfinite(age_limit) or age_limit <= 0:
-        raise ValueError("invalid maximum_feedback_age_ms in raw metadata")
+        raise ValueError(f"invalid {age_limit_source} in raw metadata")
     with csv_path.open(newline="") as stream:
         reader = csv.DictReader(stream)
         required = {*SIGNALS, "timestamp_host_rx_ns", "timestamp_lower_ns", "control_mode",
@@ -112,7 +121,15 @@ def preprocess(csv_path: str | Path, output: str | Path, *, options: dict | None
             first = end
             continue
         used = False
+        rejected_reason = None
         for i in range(first, end):
+            # Once one row has represented this lower feedback publication, all
+            # later rows with the same lower timestamp are duplicate snapshots,
+            # not new physical measurements. Their host timestamp/age must not
+            # manufacture artificial segment boundaries.
+            if used:
+                counts["duplicate_feedback"] += 1
+                continue
             row = rows[i]
             reason = None
             if row["control_mode"] != "excitation" or row["command_valid"] != "1" or row["servo_active"] != "1":
@@ -127,16 +144,21 @@ def preprocess(csv_path: str | Path, output: str | Path, *, options: dict | None
                 ages = np.array([float(row[f"feedback_age_ms{j}"]) for j in range(6)])
                 if not np.isfinite(ages).all() or (ages < 0).any() or (ages > age_limit).any():
                     reason = "stale_or_invalid_age"
-                elif i and host[i] == host[i - 1]:
+                elif i and host[i] == host[i - 1] and lower[i] != lower[i - 1]:
                     reason = "duplicate_host_timestamp"
             if reason:
-                counts[reason] += 1
-                segment += 1
-            elif used:
-                counts["duplicate_feedback"] += 1
-            else:
-                accepted.append((i, segment))
-                used = True
+                # Keep searching this repeated lower-timestamp group: a later
+                # active row may still be the first usable representation of the
+                # same physical publication. Only a wholly unusable group breaks
+                # continuity once.
+                rejected_reason = rejected_reason or reason
+                continue
+            accepted.append((i, segment))
+            used = True
+        if not used:
+            counts[rejected_reason or "unusable_feedback_group"] += 1
+            counts["duplicate_feedback"] += max(0, end - first - 1)
+            segment += 1
         first = end
     if len(accepted) < 3:
         raise ValueError(f"insufficient fresh valid excitation feedback: {dict(counts)}")
@@ -207,6 +229,8 @@ def preprocess(csv_path: str | Path, output: str | Path, *, options: dict | None
                   excluded_counts=dict(counts), trim_samples_per_segment_end=trim,
                   feedback_dt_s=dict(median=period, p95=float(np.percentile(deltas, 95)),
                                      p99=float(np.percentile(deltas, 99)), maximum=float(deltas.max())),
+                  feedback_age_limit_ms=age_limit,
+                  feedback_age_limit_source=age_limit_source,
                   qd_consistency_rmse_rad_s=np.sqrt(np.mean(differences ** 2, axis=0)).tolist())
     sidecar.write_text(yaml.safe_dump(report, sort_keys=False))
     return report

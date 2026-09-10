@@ -109,6 +109,30 @@ def test_changed_duplicate_group_excluded(tmp_path):
     assert report['excluded_counts']['inconsistent_repeated_feedback'] == 2
 
 
+def test_v3_uses_lower_feedback_timeout_not_deprecated_motion_ready_age(tmp_path):
+    raw = write_signal(tmp_path)
+    metadata_path = raw.with_suffix(".meta.yaml")
+    metadata = yaml.safe_load(metadata_path.read_text())
+    metadata["schema_version"] = "rebot_hardware_experiment_v3"
+    metadata["lower_feedback_timeout_ms"] = 250.0
+    metadata["maximum_feedback_age_ms"] = 50.0
+    metadata_path.write_text(yaml.safe_dump(metadata, sort_keys=False))
+    edit_rows(raw, lambda rows: rows[200].update(feedback_age_ms0="100.0"))
+    report = preprocess(raw, tmp_path / "output.csv")
+    assert report["feedback_age_limit_source"] == "lower_feedback_timeout_ms"
+    assert report["feedback_age_limit_ms"] == 250.0
+    assert report["excluded_counts"].get("stale_or_invalid_age", 0) == 0
+
+
+def test_duplicate_snapshot_age_does_not_create_physical_segment_break(tmp_path):
+    raw = write_signal(tmp_path)
+    edit_rows(raw, lambda rows: rows[1].update(feedback_age_ms0="1000.0"))
+    report = preprocess(raw, tmp_path / "output.csv")
+    assert report["segment_count"] == 1
+    assert report["excluded_counts"]["duplicate_feedback"] > 0
+    assert report["fresh_valid_sample_count"] == 801
+
+
 def test_short_segment_rejected(tmp_path):
     raw = write_signal(tmp_path, duration=.4)
     with pytest.raises(ValueError, match='long enough'):

@@ -1985,6 +1985,19 @@ feedback_cadence
 
 普通 `q_ref-q_measured` 超过 warning threshold 时允许继续收集，只把 `tracking_quality.status` 标成 warning；之后由离线 preprocessing/identification acceptance 决定样本或整次 run 是否可用。fault、通信断开、invalid/stale feedback、unexpected Servo ownership loss、hard position limit、Servo reject 等仍是立即停止条件。
 
+因此正式流程必须保持：
+
+```text
+successful hardware execution
+!=
+identification data acceptance
+
+A offline acceptance
+-> freeze A-derived preprocessing/model/rank/friction settings
+-> independent B hardware run
+-> A fit / B validation
+```
+
 A_run03 的诊断例子进一步说明为什么要区分这些频率：command dispatch 约 `100.004 Hz`，host receive publication 约 `90.07 Hz`，lower timestamp/effort update 约 `10.10 Hz`，而 303 条 raw row 中有 272 次连续重复 state snapshot。不能把 command rate、UDP publish rate 和 lower feedback update rate混成一个“200 Hz”。
 
 # 18. R8：真机离线预处理
@@ -2022,6 +2035,13 @@ raw hardware CSV
 - 人工急停/碰撞/外力干扰。
 
 不要为了增加样本数放宽这些条件。
+
+对 `rebot_hardware_experiment_v3`，excitation measurement usability 的 feedback-age
+source-of-truth 是 metadata 中的 `lower_feedback_timeout_ms`；`maximum_feedback_age_ms`
+已明确是兼容旧配置的 pre-motion alias，不能继续拿它当 excitation raw-data rejection
+阈值。同一个 `timestamp_lower_ns` 的多条 100 Hz CSV snapshot 只代表一次 lower physical
+feedback publication：必须先按该物理更新去重，再做 validity/segment/resampling 处理，
+不能让重复 snapshot 的 host timestamp 或 age 人为制造 segment break。
 
 ## 18.2 重采样
 
@@ -2192,6 +2212,20 @@ relative rank threshold = 1e-6 * sigma_max
 - beta/prediction 是否稳定。
 
 B 不参与这个选择。
+
+当前仓库提供纯离线 A-only acceptance 入口：
+
+```bash
+python3 scripts/audit_rebot_hardware_identification_A.py \
+  --raw-csv data/rebot_real/<A_RUN_ID>/raw.csv \
+  --output-directory results/rebot_real_identification/<A_AUDIT_ID>
+```
+
+该工具启动时输出 `OFFLINE_ONLY`，显式读取
+`time/q*/qd*/qdd_est*/effort_filtered*`，生成 A-only 60/72/78 rank threshold sweep、
+friction moving-observation sweep、reported-effort training residual、少量质量图以及
+`acceptance.yaml` / `A_IDENTIFICATION_AUDIT.md`。它不读取 B，也不把 A training fit
+称作 validation/generalization；`effort_filtered` 仍是未标定 SDK reported effort。
 
 ## 20.2 不要把 78 个 raw 参数逐项当成最终答案
 

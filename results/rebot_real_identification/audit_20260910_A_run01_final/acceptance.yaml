@@ -1,0 +1,616 @@
+schema_version: rebot_a_identification_acceptance_v1
+source_run: /home/j/j_ws/src/Robot-Parameter-Indentification-Simulation/data/rebot_real/20260910_105604_servo_safe_100hz_freshness_fix/A_run01
+raw_csv_sha256: c3fe9c969c61a677092aa411ce77762eafdbecbd1b41f2b25764283ddfb60f33
+raw_metadata_sha256: 8dc622ea703f05a96a7da8e21f981ca31d79cf2e47e301dcec947f28423bce28
+trajectory_hash: be2faa1d58fc834efbca030aea7ec9fbb28d57895aae8e449f36164e6141f131
+git_commit_at_capture: 69d17e2a5d303f297063217e5c328b480c760fda
+git_head_at_audit: 69d17e2a5d303f297063217e5c328b480c760fda
+motion_execution:
+  status: completed
+  observed_sample_count: 2946
+  accepted_excitation_command_count: 2946
+feedback:
+  physical_feedback_rate_hz: 9.999315396871406
+  resample_rate_hz: 9.0
+  raw_rows: 2946
+  fresh_feedback_samples: 305
+  duplicate_rows: 2641
+  inconsistent_repeated_feedback: 0
+  invalid_rows: 0
+  stale_rows: 0
+  fault_unsafe_rows: 0
+  segment_count: 1
+  feedback_age_limit_ms: 250.0
+  feedback_age_limit_source: lower_feedback_timeout_ms
+preprocessing:
+  cutoff_hz: 2.0
+  filter_order: 4
+  edge_trim_s: 0.5
+  trim_samples_per_segment_end: 15
+  output_sample_count: 240
+  nyquist_hz: 4.5
+  cutoff_nyquist_ratio: 0.4444444444444444
+  dt_median_s: 0.10000684649999947
+  dt_p95_s: 0.10088965070000011
+  dt_p99_s: 0.11001801180999748
+  dt_max_s: 0.11915485999999831
+  p95_jitter_from_median_s: 0.000882804200000642
+  qd_consistency_rmse_rad_s:
+  - 0.006590645628161155
+  - 0.0073031426476142984
+  - 0.008797471345322223
+  - 0.024697069114123477
+  - 0.04207360080818798
+  - 0.027170167603377874
+signal_quality:
+  q:
+  - min: -0.5903851428300033
+    max: 0.46875102847121364
+    range: 1.0591361713012168
+    rms: 0.32358587831453123
+    p95_abs: 0.5708150319830562
+    max_abs: 0.5903851428300033
+    min_margin_to_joint_limit_rad: 2.5512075107599967
+  - min: -1.5607450424035612
+    max: -0.606515496942168
+    range: 0.9542295454613932
+    rms: 1.036464923356267
+    p95_abs: 1.534890482177266
+    max_abs: 1.5607450424035612
+    min_margin_to_joint_limit_rad: 0.693781959942168
+  - min: -1.5623596306737153
+    max: -0.6480894314599567
+    range: 0.9142701992137586
+    rms: 1.0365033813162072
+    p95_abs: 1.536850129079452
+    max_abs: 1.5623596306737153
+    min_margin_to_joint_limit_rad: 0.7353558944599566
+  - min: -0.5276824712167074
+    max: 0.46903542046047686
+    range: 0.9967178916771843
+    rms: 0.33628995140675155
+    p95_abs: 0.5194177606977892
+    max_abs: 0.5276824712167074
+    min_margin_to_joint_limit_rad: 1.1358711645395232
+  - min: -0.626098238666645
+    max: 0.5512084659563224
+    range: 1.1773067046229675
+    rms: 0.34619818727372714
+    p95_abs: 0.6086771405132854
+    max_abs: 0.626098238666645
+    min_margin_to_joint_limit_rad: 0.9788083463333549
+  - min: -0.7779937728989853
+    max: -0.4513589300954659
+    range: 0.3266348428035194
+    rms: 0.6093006122412038
+    p95_abs: 0.7665691770399061
+    max_abs: 0.7779937728989853
+    min_margin_to_joint_limit_rad: 2.396912812101015
+  qd:
+  - min: -0.15419040869612677
+    max: 0.17235719170938413
+    range: 0.3265476004055109
+    rms: 0.0940084549174622
+    p95_abs: 0.15394594964464273
+    max_abs: 0.17235719170938413
+    near_zero_fraction:
+      '0.005': 0.05
+      '0.01': 0.0875
+      '0.02': 0.15416666666666667
+      '0.05': 0.3958333333333333
+  - min: -0.15608263783407125
+    max: 0.17708376878313245
+    range: 0.3331664066172037
+    rms: 0.10156821338188698
+    p95_abs: 0.16325662562503696
+    max_abs: 0.17708376878313245
+    near_zero_fraction:
+      '0.005': 0.03333333333333333
+      '0.01': 0.058333333333333334
+      '0.02': 0.10833333333333334
+      '0.05': 0.29583333333333334
+  - min: -0.1677730714641876
+    max: 0.16002027329761348
+    range: 0.3277933447618011
+    rms: 0.09551515261305817
+    p95_abs: 0.15177461581699628
+    max_abs: 0.1677730714641876
+    near_zero_fraction:
+      '0.005': 0.020833333333333332
+      '0.01': 0.029166666666666667
+      '0.02': 0.058333333333333334
+      '0.05': 0.2
+  - min: -0.20973364626884533
+    max: 0.19031494152425432
+    range: 0.40004858779309965
+    rms: 0.08700109964980386
+    p95_abs: 0.15311456131868195
+    max_abs: 0.20973364626884533
+    near_zero_fraction:
+      '0.005': 0.025
+      '0.01': 0.058333333333333334
+      '0.02': 0.12083333333333333
+      '0.05': 0.32083333333333336
+  - min: -0.2753523873941347
+    max: 0.22824337569495973
+    range: 0.5035957630890944
+    rms: 0.11975257103946073
+    p95_abs: 0.21885503915686622
+    max_abs: 0.2753523873941347
+    near_zero_fraction:
+      '0.005': 0.04583333333333333
+      '0.01': 0.09166666666666666
+      '0.02': 0.14583333333333334
+      '0.05': 0.30416666666666664
+  - min: -0.16763898797979931
+    max: 0.13403593972857403
+    range: 0.30167492770837334
+    rms: 0.0583686400704709
+    p95_abs: 0.11279345043333203
+    max_abs: 0.16763898797979931
+    near_zero_fraction:
+      '0.005': 0.0625
+      '0.01': 0.17916666666666667
+      '0.02': 0.35
+      '0.05': 0.6333333333333333
+  qdd_est:
+  - min: -0.13419499452894562
+    max: 0.14095581801859153
+    range: 0.27515081254753715
+    rms: 0.05040941140703069
+    p95_abs: 0.10654079090310942
+    max_abs: 0.14095581801859153
+    max_to_p95_ratio: 1.3230220728019553
+  - min: -0.18108507141763755
+    max: 0.13145423023205688
+    range: 0.31253930164969446
+    rms: 0.0637520079730111
+    p95_abs: 0.12753908172212575
+    max_abs: 0.18108507141763755
+    max_to_p95_ratio: 1.4198398559288241
+  - min: -0.1430982148257971
+    max: 0.16829616460793376
+    range: 0.31139437943373083
+    rms: 0.06140541745092706
+    p95_abs: 0.11580740761122948
+    max_abs: 0.16829616460793376
+    max_to_p95_ratio: 1.4532417923809444
+  - min: -0.4318651830288361
+    max: 0.3926188669109199
+    range: 0.824484049939756
+    rms: 0.13675632086979728
+    p95_abs: 0.2797999864790141
+    max_abs: 0.4318651830288361
+    max_to_p95_ratio: 1.5434782126454012
+  - min: -0.5580901741539689
+    max: 0.5738261487438524
+    range: 1.1319163228978213
+    rms: 0.22079175738397913
+    p95_abs: 0.4322152582491337
+    max_abs: 0.5738261487438524
+    max_to_p95_ratio: 1.3276397299539402
+  - min: -0.41792731949096956
+    max: 0.5720917366004333
+    range: 0.9900190560914028
+    rms: 0.1546501134605438
+    p95_abs: 0.3414112147151533
+    max_abs: 0.5720917366004333
+    max_to_p95_ratio: 1.6756676756437008
+  effort_filtered:
+  - min: -1.144417341476702
+    max: 1.1505817878834423
+    range: 2.2949991293601446
+    rms: 0.8678394639148337
+    p95_abs: 1.0685619053589164
+    max_abs: 1.1505817878834423
+    max_adjacent_jump: 0.4955448920903256
+    finite: true
+    flatline: false
+  - min: -1.192301652284545
+    max: 9.6350696496992
+    range: 10.827371301983746
+    rms: 3.6708854819709233
+    p95_abs: 7.685303448148031
+    max_abs: 9.6350696496992
+    max_adjacent_jump: 1.6832277291000635
+    finite: true
+    flatline: false
+  - min: -9.823287354659763
+    max: -4.7175513349671245
+    range: 5.105736019692639
+    rms: 7.41550344395796
+    p95_abs: 9.547986597423987
+    max_abs: 9.823287354659763
+    max_adjacent_jump: 1.7430429052760914
+    finite: true
+    flatline: false
+  - min: -2.0164157715361055
+    max: -1.134885964475222
+    range: 0.8815298070608835
+    rms: 1.6193878098628616
+    p95_abs: 1.9572044411940734
+    max_abs: 2.0164157715361055
+    max_adjacent_jump: 0.1655958343906465
+    finite: true
+    flatline: false
+  - min: -0.2767853917903203
+    max: 0.3282318539345179
+    range: 0.6050172457248382
+    rms: 0.1412532945515048
+    p95_abs: 0.24922283065781473
+    max_abs: 0.3282318539345179
+    max_adjacent_jump: 0.07894090621948507
+    finite: true
+    flatline: false
+  - min: -0.2270103253599244
+    max: 0.16742884550548032
+    range: 0.3944391708654047
+    rms: 0.11548940707800306
+    p95_abs: 0.1836135260762211
+    max_abs: 0.2270103253599244
+    max_adjacent_jump: 0.08665147695844871
+    finite: true
+    flatline: false
+regressor:
+  rank_60:
+    raw_columns: 60
+    structural_zero_columns:
+    - 0
+    - 1
+    - 2
+    - 3
+    - 4
+    - 5
+    - 6
+    - 7
+    - 8
+    near_zero_columns: []
+    thresholds:
+    - relative_tolerance: 1.0e-05
+      rank: 36
+      sigma_max: 2.9192576457995636
+      smallest_retained_sigma: 0.08217401073014245
+      effective_condition: 35.52531536261919
+      near_zero_singular_directions: 24
+    - relative_tolerance: 1.0e-06
+      rank: 36
+      sigma_max: 2.9192576457995636
+      smallest_retained_sigma: 0.08217401073014245
+      effective_condition: 35.52531536261919
+      near_zero_singular_directions: 24
+    - relative_tolerance: 1.0e-07
+      rank: 36
+      sigma_max: 2.9192576457995636
+      smallest_retained_sigma: 0.08217401073014245
+      effective_condition: 35.52531536261919
+      near_zero_singular_directions: 24
+  rank_72:
+    raw_columns: 72
+    structural_zero_columns:
+    - 0
+    - 1
+    - 2
+    - 3
+    - 4
+    - 5
+    - 6
+    - 7
+    - 8
+    near_zero_columns: []
+    thresholds:
+    - relative_tolerance: 1.0e-05
+      rank: 46
+      sigma_max: 3.071624068954851
+      smallest_retained_sigma: 0.07733486271949731
+      effective_condition: 39.718491259187914
+      near_zero_singular_directions: 26
+    - relative_tolerance: 1.0e-06
+      rank: 46
+      sigma_max: 3.071624068954851
+      smallest_retained_sigma: 0.07733486271949731
+      effective_condition: 39.718491259187914
+      near_zero_singular_directions: 26
+    - relative_tolerance: 1.0e-07
+      rank: 46
+      sigma_max: 3.071624068954851
+      smallest_retained_sigma: 0.07733486271949731
+      effective_condition: 39.718491259187914
+      near_zero_singular_directions: 26
+  rank_78:
+    raw_columns: 78
+    structural_zero_columns:
+    - 0
+    - 1
+    - 2
+    - 3
+    - 4
+    - 5
+    - 6
+    - 7
+    - 8
+    near_zero_columns: []
+    thresholds:
+    - relative_tolerance: 1.0e-05
+      rank: 52
+      sigma_max: 3.073099678550078
+      smallest_retained_sigma: 0.07652152740614838
+      effective_condition: 40.15993646126775
+      near_zero_singular_directions: 26
+    - relative_tolerance: 1.0e-06
+      rank: 52
+      sigma_max: 3.073099678550078
+      smallest_retained_sigma: 0.07652152740614838
+      effective_condition: 40.15993646126775
+      near_zero_singular_directions: 26
+    - relative_tolerance: 1.0e-07
+      rank: 52
+      sigma_max: 3.073099678550078
+      smallest_retained_sigma: 0.07652152740614838
+      effective_condition: 40.15993646126775
+      near_zero_singular_directions: 26
+friction:
+  threshold_sweep:
+  - threshold_rad_s: 0.005
+    total_count: 1383
+    per_joint_count:
+    - 228
+    - 232
+    - 235
+    - 234
+    - 229
+    - 225
+    per_joint_fraction:
+    - 0.95
+    - 0.9666666666666667
+    - 0.9791666666666666
+    - 0.975
+    - 0.9541666666666667
+    - 0.9375
+  - threshold_rad_s: 0.01
+    total_count: 1319
+    per_joint_count: &id001
+    - 219
+    - 226
+    - 233
+    - 226
+    - 218
+    - 197
+    per_joint_fraction: &id002
+    - 0.9125
+    - 0.9416666666666667
+    - 0.9708333333333333
+    - 0.9416666666666667
+    - 0.9083333333333333
+    - 0.8208333333333333
+  - threshold_rad_s: 0.02
+    total_count: 1215
+    per_joint_count:
+    - 203
+    - 214
+    - 226
+    - 211
+    - 205
+    - 156
+    per_joint_fraction:
+    - 0.8458333333333333
+    - 0.8916666666666667
+    - 0.9416666666666667
+    - 0.8791666666666667
+    - 0.8541666666666666
+    - 0.65
+  - threshold_rad_s: 0.05
+    total_count: 924
+    per_joint_count:
+    - 145
+    - 169
+    - 192
+    - 163
+    - 167
+    - 88
+    per_joint_fraction:
+    - 0.6041666666666666
+    - 0.7041666666666667
+    - 0.8
+    - 0.6791666666666667
+    - 0.6958333333333333
+    - 0.36666666666666664
+  selected_0p01_per_joint_count: *id001
+  selected_0p01_per_joint_fraction: *id002
+tracking:
+  status: warning
+  max_abs_rad: 0.09044647267921556
+  interpretation: motion/control tracking warning; not an automatic measured-state
+    identification rejection
+  measured_state_relation:
+    sampling_semantics: q_cmd interpolated onto deduplicated/resampled measured-state
+      host-time grid
+    per_joint:
+    - joint: 1
+      rmse_rad: 0.03183604289264076
+      mae_rad: 0.026864035152728737
+      bias_rad: -0.0007459535259993655
+      p95_abs_rad: 0.05162418027022421
+      max_abs_rad: 0.05676108984460149
+      correlation_with_measured_signals:
+        q: -0.016795736680064545
+        qd: 0.99747885673988
+        qdd_est: 0.05122447823070266
+        effort_filtered: 0.8628120949311938
+    - joint: 2
+      rmse_rad: 0.03791205830606207
+      mae_rad: 0.03305879200039105
+      bias_rad: 0.000858889795627682
+      p95_abs_rad: 0.059880615052959656
+      max_abs_rad: 0.06645650176532869
+      correlation_with_measured_signals:
+        q: -0.022520672776921633
+        qd: 0.9968819374384372
+        qdd_est: 0.03990237019394468
+        effort_filtered: 0.41631810713226486
+    - joint: 3
+      rmse_rad: 0.036753117290506926
+      mae_rad: 0.03348126087146461
+      bias_rad: 0.00036819463570273066
+      p95_abs_rad: 0.05830203288872012
+      max_abs_rad: 0.05982161691048371
+      correlation_with_measured_signals:
+        q: -0.023862579863776878
+        qd: 0.9958374648121658
+        qdd_est: 0.022485776728640654
+        effort_filtered: 0.884731641539948
+    - joint: 4
+      rmse_rad: 0.021734170761516878
+      mae_rad: 0.01947775271224581
+      bias_rad: 0.0010061104208790223
+      p95_abs_rad: 0.033032099209770883
+      max_abs_rad: 0.03451688002507153
+      correlation_with_measured_signals:
+        q: -0.023163273929008493
+        qd: 0.9582000297152631
+        qdd_est: 0.0420829452439552
+        effort_filtered: 0.7639301034113882
+    - joint: 5
+      rmse_rad: 0.03541155055566187
+      mae_rad: 0.031087830753286794
+      bias_rad: -2.6186403719127837e-05
+      p95_abs_rad: 0.0643086995883295
+      max_abs_rad: 0.0677615605429597
+      correlation_with_measured_signals:
+        q: -0.045433204834414896
+        qd: 0.9353329752761367
+        qdd_est: 0.02695966316567332
+        effort_filtered: 0.7616670108557271
+    - joint: 6
+      rmse_rad: 0.012576128992350156
+      mae_rad: 0.010934935102200805
+      bias_rad: -0.000286426256221022
+      p95_abs_rad: 0.020751521773124636
+      max_abs_rad: 0.023056319543608206
+      correlation_with_measured_signals:
+        q: -0.03968515991709818
+        qd: 0.8848916592376437
+        qdd_est: 0.02931848933497
+        effort_filtered: 0.8515899128025617
+effort:
+  source: SDK public JointState.torque_nm joint-side DM feedback estimate mapped by
+    joint_direction
+  calibrated: false
+  interpretation: SDK reported effort only; no physical joint-torque ground-truth
+    claim
+training_fit:
+  semantics: training diagnostic only; uncalibrated reported-effort fit
+  aggregate:
+    count: 1319
+    rmse: 0.2343286350486303
+    mae: 0.13795470744149327
+    bias: -0.006479037663249765
+    p95_abs_residual: 0.4798154851163382
+    max_abs_residual: 2.2432886937514667
+    rms_normalized_error: 0.06560426071054747
+    r_squared: 0.9952771434382545
+  per_joint:
+  - joint: 1
+    count: 219
+    rmse: 0.1839103075611749
+    mae: 0.14408873259929095
+    bias: -0.02188437520616864
+    p95_abs_residual: 0.380340671409261
+    max_abs_residual: 0.6006080507292786
+    rms_normalized_error: 0.20813434989429616
+    r_squared: 0.956663318376417
+    residual_correlation:
+      q: -0.13430452167268161
+      qd: -0.007475319753607931
+      qdd_est: 0.006327828811113675
+  - joint: 2
+    count: 226
+    rmse: 0.3981633506496346
+    mae: 0.2845927776466078
+    bias: -5.641403220546711e-05
+    p95_abs_residual: 0.8929505900335504
+    max_abs_residual: 1.5068361708935631
+    rms_normalized_error: 0.10753987321888879
+    r_squared: 0.9715316771812847
+    residual_correlation:
+      q: 0.0003245956402751785
+      qd: -5.549569099421986e-07
+      qdd_est: -4.416058539474755e-06
+  - joint: 3
+    count: 233
+    rmse: 0.3377405842055147
+    mae: 0.23897785147464842
+    bias: 0.00043761166795633534
+    p95_abs_residual: 0.5789320808151799
+    max_abs_residual: 2.2432886937514667
+    rms_normalized_error: 0.045296005003197706
+    r_squared: 0.9659961172913034
+    residual_correlation:
+      q: -0.05412863980721313
+      qd: 8.351976767691151e-06
+      qdd_est: 1.640752101588154e-05
+  - joint: 4
+    count: 226
+    rmse: 0.06993466685793802
+    mae: 0.05142906562132037
+    bias: 0.004772756975192607
+    p95_abs_residual: 0.11880794002302858
+    max_abs_residual: 0.3565255577566746
+    rms_normalized_error: 0.04299968318798467
+    r_squared: 0.909529660920638
+    residual_correlation:
+      q: -0.36504082163004287
+      qd: 0.001668744674191949
+      qdd_est: 0.0015233816758202195
+  - joint: 5
+    count: 218
+    rmse: 0.07160021355997967
+    mae: 0.05554091925049239
+    bias: -0.01868434349333975
+    p95_abs_residual: 0.1433786795382708
+    max_abs_residual: 0.24915598973516145
+    rms_normalized_error: 0.5069387150667259
+    r_squared: 0.7429771328427379
+    residual_correlation:
+      q: -0.4132544835783837
+      qd: -0.015531407517293906
+      qdd_est: -0.0006452432826977797
+  - joint: 6
+    count: 197
+    rmse: 0.04445374165786283
+    mae: 0.03388898633163823
+    bias: -0.0043037697963267075
+    p95_abs_residual: 0.08807792447162516
+    max_abs_residual: 0.19364100351373387
+    rms_normalized_error: 0.37466570077106953
+    r_squared: 0.8548590950769424
+    residual_correlation:
+      q: 0.1706431449045764
+      qd: -0.010002401713116867
+      qdd_est: -0.00048242465332714603
+plots:
+- q.png
+- qd.png
+- qdd_est.png
+- effort_filtered.png
+- qd_consistency.png
+identification_acceptance:
+  status: A_ACCEPT_WITH_WARNINGS
+  reasons:
+  - hardware motion completed
+  - physical feedback deduplicated before resampling
+  - processed data finite and continuous
+  - 60/72/78 regressor ranks stable at 1e-5/1e-6/1e-7 and match established reBot
+    structural ranks
+  - A-only OLS uses measured q/qd, derived qdd_est, and uncalibrated effort_filtered
+  warnings:
+  - 2 Hz cutoff uses 0.444 of Nyquist at 9.0 Hz resampling; margin is limited
+  - filtered SDK qd vs d/dt(filtered q) disagreement exceeds 0.02 rad/s on at least
+    one joint
+  - motion tracking quality is warning, but measured-state continuity/rank are audited
+    separately
+  - effort_filtered is uncalibrated SDK reported effort, not joint torque ground truth
+  - friction threshold 0.01 rad/s is below some qd consistency RMSE values; retain
+    only as an A-frozen modeling choice, not a measured noise-floor claim
+  blockers: []
+  next_action: Freeze A-derived preprocessing/model/rank/friction settings; then prepare
+    independent B_run01; do not tune settings after inspecting B.
