@@ -20,8 +20,11 @@ from rebot_real.mock_client import MockArmClient
 from rebot_real.runner import RebotHardwareRunner, load_hardware_config
 from rebot_real.trajectory_artifact import (
     CSV_COLUMNS,
+    TRAJECTORY_REPLAY_MODE,
+    evaluate_actual_time_timing_profile,
     load_replay_artifact,
     qualify_replay_artifact,
+    resample_actual_time_quintic,
     sha256_file,
     validate_preview_acceptance,
     validate_replay_runtime_limits,
@@ -56,11 +59,9 @@ class ReplayFixture:
     @staticmethod
     def default_rows() -> list[list[float]]:
         rows = []
-        for index, delta in enumerate((0.0, 0.001, 0.002)):
+        for index in range(3):
             q = list(Q0)
-            q[0] += delta
             qd = [0.0] * 6
-            qd[0] = 0.1 if index else 0.0
             qdd = [0.0] * 6
             rows.append([index * 0.01, *q, *qd, *qdd])
         return rows
@@ -82,6 +83,9 @@ class ReplayFixture:
             "source_controller_precheck": "PASS",
             "collision_precheck": "PASS",
             "collision_precheck_sample_count": len(rows),
+            "continuous_quintic_collision_precheck": "PASS",
+            "continuous_quintic_collision_subdivisions_per_interval": 10,
+            "continuous_quintic_collision_precheck_sample_count": (len(rows) - 1) * 10 + 1,
             "sample_rate_status": "candidate_replay_rate_not_hardware_certified",
             "q_start": list(rows[0][1:7]),
             "trajectory_sha256": sha256_file(self.artifact),
@@ -115,9 +119,11 @@ class ReplayFixture:
         if create_report:
             self.report.write_text(
                 yaml.safe_dump({
-                    "schema_version": "rebot_trajectory_preview_report_v1",
+                    "schema_version": "rebot_trajectory_preview_report_v2",
+                    "trajectory_replay_mode": TRAJECTORY_REPLAY_MODE,
                     "trajectory_sha256": artifact_hash if report_hash is None else report_hash,
                     "preview_status": report_status,
+                    "continuous_quintic_collision_precheck": "PASS",
                 }, sort_keys=False),
                 encoding="utf-8",
             )
@@ -125,10 +131,13 @@ class ReplayFixture:
             self.mp4.write_bytes(b"mock preview")
         self.acceptance.write_text(
             yaml.safe_dump({
-                "schema_version": "rebot_trajectory_preview_acceptance_v1",
+                "schema_version": "rebot_trajectory_preview_acceptance_v2",
                 "trajectory_sha256": artifact_hash if acceptance_hash is None else acceptance_hash,
+                "trajectory_replay_mode": TRAJECTORY_REPLAY_MODE,
                 "preview_report": str(self.report),
+                "preview_report_sha256": sha256_file(self.report) if create_report else "0" * 64,
                 "preview_mp4": str(self.mp4),
+                "preview_mp4_sha256": sha256_file(self.mp4) if create_mp4 else "0" * 64,
                 "operator": "test",
                 "review_date": "2026-09-08",
                 "accepted_for_hardware": accepted,
@@ -142,6 +151,7 @@ class ReplayFixture:
             repo_root=REPO_ROOT,
         )
         config.update({
+            "trajectory_replay_mode": TRAJECTORY_REPLAY_MODE,
             "control_rate_hz": 100.0,
             "duration_s": 0.02,
             "joint_position_min_rad": [-2.8, -3.14, -3.14, -1.87, -1.57, -3.14],
@@ -164,6 +174,7 @@ class ReplayFixture:
         config["joint_mapping_scope"] = "excitation"
         config["start_position_tolerance_rad"] = 0.01
         config["trajectory_source"] = "frozen_replay_artifact"
+        config["trajectory_replay_mode"] = TRAJECTORY_REPLAY_MODE
         config["trajectory_hash"] = None
         config["trajectory_artifact"] = str(self.artifact)
         config["trajectory_metadata"] = str(self.metadata)
@@ -185,6 +196,28 @@ class TrajectoryArtifactTest(unittest.TestCase):
             fixture = ReplayFixture(directory)
             artifact = load_replay_artifact(fixture.artifact, fixture.metadata)
             self.assertEqual(artifact.sha256, sha256_file(fixture.artifact))
+
+    def test_quintic_matches_every_knot_and_is_c2_at_boundaries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = ReplayFixture(directory)
+            artifact = load_replay_artifact(fixture.artifact, fixture.metadata)
+            for sample in artifact.samples:
+                target = resample_actual_time_quintic(artifact, sample.time)
+                self.assertEqual(target.q_ref, sample.q_ref)
+                self.assertEqual(target.qd_ref, sample.qd_ref)
+                self.assertEqual(target.qdd_ref, sample.qdd_ref)
+            knot = artifact.samples[1]
+            left = resample_actual_time_quintic(artifact, knot.time - 1e-9)
+            right = resample_actual_time_quintic(artifact, knot.time + 1e-9)
+            for actual_left, actual_right, exact in zip(left.q_ref, right.q_ref, knot.q_ref):
+                self.assertAlmostEqual(actual_left, exact, places=10)
+                self.assertAlmostEqual(actual_right, exact, places=10)
+            for actual_left, actual_right, exact in zip(left.qd_ref, right.qd_ref, knot.qd_ref):
+                self.assertAlmostEqual(actual_left, exact, places=8)
+                self.assertAlmostEqual(actual_right, exact, places=8)
+            for actual_left, actual_right, exact in zip(left.qdd_ref, right.qdd_ref, knot.qdd_ref):
+                self.assertAlmostEqual(actual_left, exact, places=6)
+                self.assertAlmostEqual(actual_right, exact, places=6)
 
     def test_nan_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -289,12 +322,9 @@ class TrajectoryArtifactTest(unittest.TestCase):
 
         self.assertEqual(old_report["preview_status"], "FAIL")
         self.assertEqual(old_report["servo_target_delta_design_status"], "FAIL")
-        self.assertEqual(
+        self.assertIn(
+            "J4 ServoCore target delta gate violated: 0.00349060933 > 0.003125 rad",
             old_report["failures"],
-            [
-                "J4 ServoCore target delta gate violated: "
-                "0.00349060933 > 0.003125 rad"
-            ],
         )
         self.assertAlmostEqual(
             old_report["per_joint"][3]["servo_target_delta_abs_max"],
@@ -302,15 +332,55 @@ class TrajectoryArtifactTest(unittest.TestCase):
             places=15,
         )
 
-        self.assertEqual(new_report["preview_status"], "PASS")
+        self.assertEqual(new_report["preview_status"], "FAIL")
         self.assertEqual(new_report["servo_target_delta_design_status"], "PASS")
-        self.assertEqual(new_report["failures"], [])
+        self.assertIn(
+            "continuous quintic collision precheck is not PASS",
+            new_report["failures"],
+        )
         self.assertLessEqual(
             max(
                 item["servo_target_delta_abs_max"]
                 for item in new_report["per_joint"]
             ),
             0.0028 + 1e-12,
+        )
+
+    def test_optimized_A_actual_time_jitter_profiles_complete(self) -> None:
+        root = REPO_ROOT / "results/rebot_real_ab_servo_safe_100hz_optimized/A"
+        timing_csv = (
+            REPO_ROOT
+            / "data/rebot_real/20260909_servo_safe_100hz_optimized/A_run02/raw.csv"
+        )
+        self._require_local_evidence(root / "trajectory.csv", root / "trajectory.meta.yaml", timing_csv)
+        artifact = load_replay_artifact(root / "trajectory.csv", root / "trajectory.meta.yaml")
+        config = load_hardware_config(
+            REPO_ROOT / "config/rebot_excitation_actual_time_pending.yaml",
+            repo_root=REPO_ROOT,
+        )
+        config["joint_position_min_rad"] = [-3.14159265359, -3.174906585, -3.174906585, -1.904906585, -1.604906585, -3.174906585]
+        config["joint_position_max_rad"] = [3.14159265359, 0.087266463, 0.087266463, 1.604906585, 1.604906585, 3.174906585]
+        with timing_csv.open(newline="") as stream:
+            intervals = [
+                int(row["actual_dispatch_interval_ns"]) * 1e-9
+                for row in csv.DictReader(stream)
+                if row["actual_dispatch_interval_ns"]
+            ]
+        reports = [
+            evaluate_actual_time_timing_profile(
+                artifact, config, [0.010, 0.013], profile_name="alternating"
+            ),
+            evaluate_actual_time_timing_profile(
+                artifact, config, intervals, profile_name="A_run02",
+                repeat_profile_to_endpoint=False,
+            ),
+        ]
+        for report in reports:
+            self.assertEqual(report["status"], "PASS")
+            self.assertEqual(report["trajectory_time_end_s"], 30.0)
+        self.assertLess(
+            max(v["jerk_abs_max_rad_s3"] for v in reports[1]["per_joint"].values()),
+            40.0,
         )
 
     def test_optimized_A_excitation_quality_regression(self) -> None:
@@ -367,6 +437,9 @@ class TrajectoryArtifactTest(unittest.TestCase):
     def test_velocity_violation_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             fixture = ReplayFixture(directory)
+            rows = fixture.default_rows()
+            rows[1][7] = 0.1
+            fixture.write_artifact(rows=rows)
             with self.assertRaisesRegex(ValueError, "violates velocity limit"):
                 self._validate_runtime(
                     fixture,
@@ -494,6 +567,36 @@ class TrajectoryArtifactTest(unittest.TestCase):
             with self.assertRaisesRegex(PermissionError, "report hash"):
                 self._run_replay(fixture, factory=factory)
             self.assertEqual(called, [])
+
+    def test_acceptance_rejects_tampered_report_mp4_and_strategy(self) -> None:
+        for tamper, pattern in (
+            ("report", "report hash mismatch"),
+            ("mp4", "MP4 hash mismatch"),
+            ("strategy", "strategy mismatch"),
+        ):
+            with self.subTest(tamper=tamper), tempfile.TemporaryDirectory() as directory:
+                fixture = ReplayFixture(directory)
+                fixture.write_preview_evidence()
+                if tamper == "report":
+                    fixture.report.write_text(fixture.report.read_text() + "notes: changed\n")
+                elif tamper == "mp4":
+                    fixture.mp4.write_bytes(b"changed preview")
+                else:
+                    acceptance = yaml.safe_load(fixture.acceptance.read_text())
+                    acceptance["trajectory_replay_mode"] = "fixed_samples_v1"
+                    fixture.acceptance.write_text(yaml.safe_dump(acceptance, sort_keys=False))
+                with self.assertRaisesRegex(PermissionError, pattern):
+                    self._run_replay(fixture, factory=lambda **kwargs: MockArmClient(**kwargs))
+
+    def test_v1_acceptance_cannot_authorize_actual_time_replay(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = ReplayFixture(directory)
+            fixture.write_preview_evidence()
+            acceptance = yaml.safe_load(fixture.acceptance.read_text())
+            acceptance["schema_version"] = "rebot_trajectory_preview_acceptance_v1"
+            fixture.acceptance.write_text(yaml.safe_dump(acceptance, sort_keys=False))
+            with self.assertRaisesRegex(ValueError, "acceptance v2 is required"):
+                self._run_replay(fixture, factory=lambda **kwargs: MockArmClient(**kwargs))
 
     def test_missing_report_rejected_before_client_factory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -729,13 +832,34 @@ class TrajectoryArtifactTest(unittest.TestCase):
         self.assertEqual(len(artifact.samples), 3001)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            runtime_metadata_path = root / "trajectory.meta.yaml"
+            runtime_metadata = dict(artifact.metadata)
+            runtime_metadata.update(
+                continuous_quintic_collision_precheck="PASS",
+                continuous_quintic_collision_subdivisions_per_interval=10,
+                continuous_quintic_collision_precheck_sample_count=30001,
+            )
+            runtime_metadata_path.write_text(
+                yaml.safe_dump(runtime_metadata, sort_keys=False)
+            )
+            report_path = root / "preview_report.yaml"
+            report_path.write_text(yaml.safe_dump({
+                "schema_version": "rebot_trajectory_preview_report_v2",
+                "trajectory_replay_mode": TRAJECTORY_REPLAY_MODE,
+                "trajectory_sha256": artifact.sha256,
+                "continuous_quintic_collision_precheck": "PASS",
+                "preview_status": "PASS",
+            }, sort_keys=False))
             acceptance = root / "acceptance.yaml"
             acceptance.write_text(
                 yaml.safe_dump({
-                    "schema_version": "rebot_trajectory_preview_acceptance_v1",
+                    "schema_version": "rebot_trajectory_preview_acceptance_v2",
+                    "trajectory_replay_mode": TRAJECTORY_REPLAY_MODE,
                     "trajectory_sha256": artifact.sha256,
                     "preview_report": str(report_path),
+                    "preview_report_sha256": sha256_file(report_path),
                     "preview_mp4": str(mp4_path),
+                    "preview_mp4_sha256": sha256_file(mp4_path),
                     "operator": "",
                     "review_date": None,
                     "accepted_for_hardware": False,
@@ -750,7 +874,7 @@ class TrajectoryArtifactTest(unittest.TestCase):
             config["control_rate_hz"] = 100.0
             config["duration_s"] = 30.0
             config["trajectory_artifact"] = str(artifact_path)
-            config["trajectory_metadata"] = str(metadata_path)
+            config["trajectory_metadata"] = str(runtime_metadata_path)
             config["trajectory_preview_acceptance"] = str(acceptance)
             clock_ns = [1_000_000_000]
 

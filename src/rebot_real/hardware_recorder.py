@@ -13,7 +13,7 @@ from .sdk_adapter import detect_sdk_version
 from .state_capture import CaptureSample, JOINT_COUNT
 
 
-SCHEMA_VERSION = "rebot_hardware_experiment_v2"
+SCHEMA_VERSION = "rebot_hardware_experiment_v3"
 
 CSV_COLUMNS = (
     "sample_index",
@@ -24,6 +24,9 @@ CSV_COLUMNS = (
     "actual_dispatch_interval_ns",
     "reference_dispatch_skew_ns",
     "state_snapshot_age_ms",
+    "trajectory_time_s",
+    "trajectory_interval_index",
+    "trajectory_interval_ratio",
     "servo_sequence",
     *(f"q{joint}" for joint in range(JOINT_COUNT)),
     *(f"qd{joint}" for joint in range(JOINT_COUNT)),
@@ -63,6 +66,7 @@ class HardwareExperimentRecorder:
         self.preposition_result: dict[str, Any] | None = None
         self.failure_result: dict[str, Any] | None = None
         self.shutdown_result: dict[str, Any] | None = None
+        self.runtime_envelope_result: dict[str, Any] | None = None
         self.motion_status = "unknown"
         self.csv_path.parent.mkdir(parents=True, exist_ok=True)
         self._stream = self.csv_path.open("w", encoding="utf-8", newline="")
@@ -83,6 +87,9 @@ class HardwareExperimentRecorder:
         actual_dispatch_interval_ns: int | None = None,
         reference_dispatch_skew_ns: int | None = None,
         state_snapshot_age_ms: float | None = None,
+        trajectory_time_s: float | None = None,
+        trajectory_interval_index: int | None = None,
+        trajectory_interval_ratio: float | None = None,
     ) -> None:
         """Write one state sample plus the exact position-command contract fields."""
 
@@ -109,6 +116,15 @@ class HardwareExperimentRecorder:
             ),
             "state_snapshot_age_ms": (
                 "" if state_snapshot_age_ms is None else float(state_snapshot_age_ms)
+            ),
+            "trajectory_time_s": (
+                "" if trajectory_time_s is None else float(trajectory_time_s)
+            ),
+            "trajectory_interval_index": (
+                "" if trajectory_interval_index is None else int(trajectory_interval_index)
+            ),
+            "trajectory_interval_ratio": (
+                "" if trajectory_interval_ratio is None else float(trajectory_interval_ratio)
             ),
             "servo_sequence": "" if servo_sequence is None else int(servo_sequence),
             "robot_mode": sample.robot_mode,
@@ -152,6 +168,8 @@ class HardwareExperimentRecorder:
                 metadata["failure"] = self.failure_result
             if self.shutdown_result is not None:
                 metadata["shutdown"] = self.shutdown_result
+            if self.runtime_envelope_result is not None:
+                metadata["runtime_servo_envelope"] = self.runtime_envelope_result
             metadata["motion_status"] = self.motion_status
             timing = self._build_dispatch_timing_metadata()
             if timing is not None:
@@ -188,7 +206,7 @@ class HardwareExperimentRecorder:
         return yaml.safe_load(self.metadata_path.read_text(encoding="utf-8"))
 
     def _build_dispatch_timing_metadata(self) -> dict[str, Any] | None:
-        """Summarize nominal frozen-grid timing separately from real dispatch timing."""
+        """Summarize actual-time replay and real dispatch timing."""
 
         if not self.csv_path.is_file():
             return None
@@ -204,12 +222,12 @@ class HardwareExperimentRecorder:
         dispatches = [int(row["actual_dispatch_timestamp_ns"]) for row in rows]
         dispatch_intervals = [int(row["actual_dispatch_interval_ns"]) for row in rows]
         skews = [int(row["reference_dispatch_skew_ns"]) for row in rows]
-        nominal_references = [
+        trajectory_references = [
             dispatch - skew for dispatch, skew in zip(dispatches, skews)
         ]
         reference_intervals = [
             current - previous
-            for previous, current in zip(nominal_references, nominal_references[1:])
+            for previous, current in zip(trajectory_references, trajectory_references[1:])
         ]
         period_ns = int(round(1e9 / float(self.config["control_rate_hz"])))
         below_period_count = sum(value < period_ns for value in dispatch_intervals)
@@ -221,10 +239,11 @@ class HardwareExperimentRecorder:
                 "timestamp passed to ArmClient.servo_joint"
             ),
             "replay_semantics": (
-                "exact frozen q_ref sequence; no runner resampling; no catch-up burst"
+                "approved continuous quintic path resampled at real dispatch time; "
+                "no catch-up burst"
             ),
-            "nominal_reference_timestamp_start_ns": nominal_references[0],
-            "nominal_reference_timestamp_end_ns": nominal_references[-1],
+            "trajectory_reference_timestamp_start_ns": trajectory_references[0],
+            "trajectory_reference_timestamp_end_ns": trajectory_references[-1],
             "nominal_reference_interval_min_ns": (
                 period_ns if not reference_intervals else min(reference_intervals)
             ),
@@ -268,6 +287,13 @@ class HardwareExperimentRecorder:
             return None
 
         thresholds = [float(value) for value in self.config["maximum_tracking_error_rad"]]
+        def trajectory_time(row: dict[str, str]) -> float:
+            value = row.get("trajectory_time_s", "")
+            return (
+                float(value)
+                if value not in (None, "")
+                else int(row["sample_index"]) / float(self.config["control_rate_hz"])
+            )
         per_joint: dict[str, Any] = {}
         any_exceed_rows: list[int] = []
         overall = (-1.0, None, None)
@@ -298,8 +324,7 @@ class HardwareExperimentRecorder:
                 "first_threshold_exceed_artifact_time_s": (
                     None
                     if first is None
-                    else int(rows[first]["sample_index"])
-                    / float(self.config["control_rate_hz"])
+                    else trajectory_time(rows[first])
                 ),
             }
 
@@ -320,8 +345,7 @@ class HardwareExperimentRecorder:
             "first_threshold_exceed_artifact_time_s": (
                 None
                 if first_any is None
-                else int(rows[first_any]["sample_index"])
-                / float(self.config["control_rate_hz"])
+                else trajectory_time(rows[first_any])
             ),
             "overall_max_abs_rad": overall_error,
             "overall_max_joint": (
@@ -495,9 +519,21 @@ def build_hardware_metadata(
         "joint_position_min_rad": list(config["joint_position_min_rad"]),
         "joint_position_max_rad": list(config["joint_position_max_rad"]),
         "maximum_command_velocity_rad_s": list(config["maximum_command_velocity_rad_s"]),
+        "maximum_command_acceleration_rad_s2": list(
+            config["maximum_command_acceleration_rad_s2"]
+        ),
+        "maximum_command_jerk_rad_s3": list(
+            config["maximum_command_jerk_rad_s3"]
+        ),
         "maximum_tracking_error_rad": list(config["maximum_tracking_error_rad"]),
         "maximum_servo_target_delta_rad": float(
             config["maximum_servo_target_delta_rad"]
+        ),
+        "minimum_servo_timestamp_interval_s": float(
+            config["minimum_servo_timestamp_interval_s"]
+        ),
+        "maximum_servo_timestamp_interval_s": float(
+            config["maximum_servo_timestamp_interval_s"]
         ),
         "movej_max_velocity_rad_s": list(config["movej_max_velocity_rad_s"]),
         "movej_max_acceleration_rad_s2": list(config["movej_max_acceleration_rad_s2"]),
@@ -552,12 +588,17 @@ def build_hardware_metadata(
         "feedback_sequence_supported": False,
         "trajectory_source": str(config.get("trajectory_source", "none")),
         "trajectory_hash": config.get("trajectory_hash"),
+        "trajectory_replay_mode": config.get("trajectory_replay_mode"),
         "upper_safety_gate": {
             "six_dof_validation": True,
             "finite_check": True,
             "mapping_verified_gate": True,
             "command_position_limit": True,
             "velocity_derived_delta_limit": True,
+            "actual_timestamp_velocity_gate": True,
+            "actual_timestamp_acceleration_gate": True,
+            "actual_timestamp_jerk_gate": True,
+            "commit_envelope_history_after_sdk_acceptance": True,
             "servo_target_delta_limit_rad": float(
                 config["maximum_servo_target_delta_rad"]
             ),

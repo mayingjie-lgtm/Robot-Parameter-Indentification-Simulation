@@ -60,12 +60,16 @@ def prepare(
                        cwd=ROOT, check=True)
         artifact = load_replay_artifact(run / "trajectory.csv", run / "trajectory.meta.yaml")
         report = qualify_replay_artifact(artifact, qualify)
-        write_preview_outputs(report=report, report_path=run / "preview_report.yaml",
-                              acceptance_path=run / "preview_acceptance.yaml", preview_mp4=run / "preview.mp4")
         if render:
             subprocess.run([str(build / "rebot_trajectory_renderer"), "--input", str(artifact.path),
                             "--output", str(run / "preview.mp4")], cwd=ROOT,
                            env=_renderer_env(), check=True)
+            write_preview_outputs(report=report, report_path=run / "preview_report.yaml",
+                                  acceptance_path=run / "preview_acceptance.yaml", preview_mp4=run / "preview.mp4")
+        else:
+            (run / "preview_report.yaml").write_text(
+                yaml.safe_dump(report, sort_keys=False, allow_unicode=True)
+            )
         if report["preview_status"] != "PASS":
             manifest["candidates"][label] = dict(
                 seed=seed,
@@ -94,6 +98,7 @@ def prepare(
                       duration_s=30.0, max_samples=None,
                       output_csv=f"data/rebot_real/{label}_run01/raw.csv",
                       trajectory_source="frozen_replay_artifact", trajectory_hash=artifact.sha256,
+                      trajectory_replay_mode="actual_time_quintic_v1",
                       trajectory_artifact=str(artifact.path), trajectory_metadata=str(artifact.metadata_path),
                       trajectory_preview_acceptance=str(run / "preview_acceptance.yaml"),
                       allow_hardware=False, allow_motion=False, joint_mapping_verified=False,

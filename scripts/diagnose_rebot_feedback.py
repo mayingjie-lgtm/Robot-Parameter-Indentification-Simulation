@@ -47,6 +47,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--udp-port", type=int, default=5001)
     parser.add_argument("--duration", type=float, default=3.0)
     parser.add_argument("--period", type=float, default=0.10)
+    parser.add_argument(
+        "--no-fault-query",
+        action="store_true",
+        help="skip read-only get_active_faults/fault_explain TCP queries",
+    )
     return parser.parse_args()
 
 
@@ -62,11 +67,15 @@ def main() -> int:
         udp_port=args.udp_port,
         disable_on_close=False,
     )
-    print("READ_ONLY_DIAGNOSTIC: connect/read/close only; no enable/disable/MoveJ/Servo commands")
+    print(
+        "READ_ONLY_DIAGNOSTIC: connect/read/fault-query/close only; "
+        "no enable/disable/reset_fault/MoveJ/Servo commands"
+    )
     arm.connect(timeout_s=3.0)
     deadline = time.monotonic() + args.duration
     last_sequence = None
     seen = 0
+    observed_fault_codes: set[int] = set()
     try:
         while time.monotonic() < deadline:
             state = arm.latest_state
@@ -102,13 +111,35 @@ def main() -> int:
                 f"bus_loss_1s={float(state.estimated_bus_loss_rate_1s):.6f}; "
                 f"diagnostic={state.diagnostic_message!r}"
             )
+            observed_fault_codes.update(
+                int(code) for code in (state.active_fault_codes or ()) if int(code) != 0
+            )
+            primary_fault = int(state.primary_fault_code)
+            if primary_fault != 0:
+                observed_fault_codes.add(primary_fault)
             time.sleep(args.period)
     finally:
+        if observed_fault_codes and not args.no_fault_query:
+            print("FAULT_QUERY: read-only Lower fault detail")
+            try:
+                active = arm.get_active_faults(timeout_s=3.0)
+            except Exception as exc:
+                print(f"  get_active_faults failed: {type(exc).__name__}: {exc}")
+            else:
+                print(f"  active_fault_detail={active}")
+            for code in sorted(observed_fault_codes):
+                try:
+                    detail = arm.fault_explain(code, timeout_s=3.0)
+                except Exception as exc:
+                    print(f"  fault_explain({code}) failed: {type(exc).__name__}: {exc}")
+                else:
+                    print(f"  fault_explain({code})={detail}")
         arm.close()
 
     if seen == 0:
         print("RESULT: no SDK state received")
         return 2
+
     print(f"RESULT: observed {seen} distinct SDK state frames")
     return 0
 

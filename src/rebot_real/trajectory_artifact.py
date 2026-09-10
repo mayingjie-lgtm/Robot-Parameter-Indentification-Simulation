@@ -4,6 +4,7 @@ import csv
 from dataclasses import dataclass
 import hashlib
 import math
+from bisect import bisect_right
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ from .state_capture import JOINT_COUNT
 
 
 SCHEMA_VERSION = "rebot_replay_trajectory_v1"
+TRAJECTORY_REPLAY_MODE = "actual_time_quintic_v1"
 CSV_COLUMNS = (
     "time",
     *(f"q_ref{joint}" for joint in range(JOINT_COUNT)),
@@ -42,6 +44,113 @@ class ReplayArtifact:
     @property
     def q_start(self) -> tuple[float, ...]:
         return self.samples[0].q_ref
+
+    @property
+    def q_end(self) -> tuple[float, ...]:
+        return self.samples[-1].q_ref
+
+
+@dataclass(frozen=True)
+class ResampledReplayTarget:
+    """One point on the C2 quintic path represented by a frozen artifact."""
+
+    trajectory_time_s: float
+    interval_index: int
+    interval_ratio: float
+    q_ref: tuple[float, ...]
+    qd_ref: tuple[float, ...]
+    qdd_ref: tuple[float, ...]
+    jerk_ref: tuple[float, ...]
+
+
+def resample_actual_time_quintic(
+    artifact: ReplayArtifact,
+    trajectory_time_s: float,
+) -> ResampledReplayTarget:
+    """Evaluate the approved path using endpoint q/qd/qdd quintic Hermite data.
+
+    Exact artifact timestamps return the stored q/qd/qdd values bit-for-bit.  The
+    caller must not use this function to extrapolate beyond the approved path.
+    """
+
+    query = float(trajectory_time_s)
+    if not math.isfinite(query):
+        raise ValueError("trajectory_time_s must be finite")
+    tolerance = max(1e-12, artifact.duration_s * 1e-14)
+    if query < -tolerance or query > artifact.duration_s + tolerance:
+        raise ValueError("trajectory_time_s is outside the frozen artifact")
+    query = min(artifact.duration_s, max(0.0, query))
+    times = tuple(sample.time for sample in artifact.samples)
+
+    knot = bisect_right(times, query) - 1
+    if knot >= 0 and abs(query - times[knot]) <= tolerance:
+        sample = artifact.samples[knot]
+        interval = min(knot, len(artifact.samples) - 2)
+        ratio = 1.0 if knot == len(artifact.samples) - 1 else 0.0
+        jerk = _quintic_interval_values(artifact.samples[interval], artifact.samples[interval + 1], ratio)[3]
+        return ResampledReplayTarget(
+            trajectory_time_s=sample.time,
+            interval_index=interval,
+            interval_ratio=ratio,
+            q_ref=sample.q_ref,
+            qd_ref=sample.qd_ref,
+            qdd_ref=sample.qdd_ref,
+            jerk_ref=jerk,
+        )
+
+    interval = min(max(knot, 0), len(artifact.samples) - 2)
+    left = artifact.samples[interval]
+    right = artifact.samples[interval + 1]
+    ratio = (query - left.time) / (right.time - left.time)
+    q, qd, qdd, jerk = _quintic_interval_values(left, right, ratio)
+    return ResampledReplayTarget(
+        trajectory_time_s=query,
+        interval_index=interval,
+        interval_ratio=ratio,
+        q_ref=q,
+        qd_ref=qd,
+        qdd_ref=qdd,
+        jerk_ref=jerk,
+    )
+
+
+def _quintic_interval_values(
+    left: ReplaySample,
+    right: ReplaySample,
+    ratio: float,
+) -> tuple[tuple[float, ...], tuple[float, ...], tuple[float, ...], tuple[float, ...]]:
+    """Return q, qd, qdd and jerk for one normalized quintic interval."""
+
+    s = float(ratio)
+    if not math.isfinite(s) or s < -1e-12 or s > 1.0 + 1e-12:
+        raise ValueError("quintic interval ratio must be in [0, 1]")
+    s = min(1.0, max(0.0, s))
+    h = right.time - left.time
+    if not math.isfinite(h) or h <= 0.0:
+        raise ValueError("quintic interval duration must be positive and finite")
+    positions: list[float] = []
+    velocities: list[float] = []
+    accelerations: list[float] = []
+    jerks: list[float] = []
+    for joint in range(JOINT_COUNT):
+        q0, q1 = left.q_ref[joint], right.q_ref[joint]
+        v0, v1 = left.qd_ref[joint], right.qd_ref[joint]
+        a0, a1 = left.qdd_ref[joint], right.qdd_ref[joint]
+        delta = q1 - q0
+        coefficients = (
+            q0,
+            h * v0,
+            0.5 * h * h * a0,
+            10.0 * delta - h * (6.0 * v0 + 4.0 * v1) - h * h * (1.5 * a0 - 0.5 * a1),
+            -15.0 * delta + h * (8.0 * v0 + 7.0 * v1) + h * h * (1.5 * a0 - a1),
+            6.0 * delta - 3.0 * h * (v0 + v1) - 0.5 * h * h * (a0 - a1),
+        )
+        c0, c1, c2, c3, c4, c5 = coefficients
+        positions.append(c0 + s * (c1 + s * (c2 + s * (c3 + s * (c4 + s * c5)))))
+        velocities.append((c1 + s * (2.0 * c2 + s * (3.0 * c3 + s * (4.0 * c4 + s * 5.0 * c5)))) / h)
+        accelerations.append((2.0 * c2 + s * (6.0 * c3 + s * (12.0 * c4 + s * 20.0 * c5))) / (h * h))
+        jerks.append((6.0 * c3 + s * (24.0 * c4 + s * 60.0 * c5)) / (h * h * h))
+    return tuple(positions), tuple(velocities), tuple(accelerations), tuple(jerks)
 
 
 def sha256_file(path: str | Path) -> str:
@@ -239,7 +348,7 @@ def qualify_replay_artifact(
     artifact: ReplayArtifact,
     config: dict[str, Any],
 ) -> dict[str, Any]:
-    """Qualify the sampled artifact itself; jerk is finite-differenced from stored qdd."""
+    """Qualify the knots and a dense evaluation of the approved quintic path."""
 
     lower = _six_limit(config, "joint_position_min_rad")
     upper = _six_limit(config, "joint_position_max_rad")
@@ -295,6 +404,38 @@ def qualify_replay_artifact(
     )
 
     failures: list[str] = []
+    replay_mode = config.get("trajectory_replay_mode", TRAJECTORY_REPLAY_MODE)
+    if replay_mode != TRAJECTORY_REPLAY_MODE:
+        failures.append(
+            f"trajectory_replay_mode={replay_mode!r} is not {TRAJECTORY_REPLAY_MODE}"
+        )
+    density = int(config.get("continuous_check_subdivisions_per_interval", 10))
+    if density < 2:
+        raise ValueError("continuous_check_subdivisions_per_interval must be at least 2")
+    dense_targets = [
+        resample_actual_time_quintic(
+            artifact,
+            left.time
+            + (right.time - left.time) * subdivision / density,
+        )
+        for left, right in zip(artifact.samples, artifact.samples[1:])
+        for subdivision in range(density)
+    ]
+    dense_targets.append(resample_actual_time_quintic(artifact, artifact.duration_s))
+    expected_dense_count = (len(artifact.samples) - 1) * density + 1
+    collision_status = artifact.metadata.get("continuous_quintic_collision_precheck")
+    collision_count = int(
+        artifact.metadata.get("continuous_quintic_collision_precheck_sample_count", -1)
+    )
+    collision_density = int(
+        artifact.metadata.get("continuous_quintic_collision_subdivisions_per_interval", -1)
+    )
+    if collision_status != "PASS":
+        failures.append("continuous quintic collision precheck is not PASS")
+    if collision_density < density or collision_count < expected_dense_count:
+        failures.append(
+            "continuous quintic collision precheck density/count is insufficient"
+        )
     if abs(artifact.sample_rate_hz - expected_rate) > rate_tol:
         failures.append(
             f"sample_rate_hz={artifact.sample_rate_hz:.17g} differs from "
@@ -314,16 +455,14 @@ def qualify_replay_artifact(
     per_joint = []
     dt = 1.0 / artifact.sample_rate_hz
     for joint in range(JOINT_COUNT):
-        q_values = [sample.q_ref[joint] for sample in artifact.samples]
-        qd_values = [sample.qd_ref[joint] for sample in artifact.samples]
-        qdd_values = [sample.qdd_ref[joint] for sample in artifact.samples]
-        jerk_values = [
-            (current - previous) / dt
-            for previous, current in zip(qdd_values, qdd_values[1:])
-        ]
+        q_values = [sample.q_ref[joint] for sample in dense_targets]
+        qd_values = [sample.qd_ref[joint] for sample in dense_targets]
+        qdd_values = [sample.qdd_ref[joint] for sample in dense_targets]
+        jerk_values = [sample.jerk_ref[joint] for sample in dense_targets]
+        knot_q_values = [sample.q_ref[joint] for sample in artifact.samples]
         target_delta_values = [
             abs(current - previous)
-            for previous, current in zip(q_values, q_values[1:])
+            for previous, current in zip(knot_q_values, knot_q_values[1:])
         ]
         q_min = min(q_values)
         q_max = max(q_values)
@@ -363,8 +502,8 @@ def qualify_replay_artifact(
                 else target_delta_abs_max <= design_target_delta + 1e-12
             ),
             "minimum_position_limit_margin": minimum_margin,
-            "start_position": q_values[0],
-            "end_position": q_values[-1],
+            "start_position": knot_q_values[0],
+            "end_position": knot_q_values[-1],
             "start_velocity": qd_values[0],
             "end_velocity": qd_values[-1],
             "start_acceleration": qdd_values[0],
@@ -387,14 +526,14 @@ def qualify_replay_artifact(
             )
         if minimum_margin < 0:
             failures.append(f"J{joint + 1} negative position-limit margin")
-        if abs(q_values[0] - expected_start[joint]) > start_position_tol:
+        if abs(knot_q_values[0] - expected_start[joint]) > start_position_tol:
             failures.append(f"J{joint + 1} start position mismatch")
         if abs(qd_values[0]) > start_velocity_tol:
             failures.append(f"J{joint + 1} start velocity not near zero")
         if abs(qdd_values[0]) > start_acceleration_tol:
             failures.append(f"J{joint + 1} start acceleration not near zero")
         if require_end_match:
-            if abs(q_values[-1] - q_values[0]) > endpoint_position_tol:
+            if abs(knot_q_values[-1] - knot_q_values[0]) > endpoint_position_tol:
                 failures.append(
                     f"J{joint + 1} endpoint position does not return to start"
                 )
@@ -407,8 +546,52 @@ def qualify_replay_artifact(
                     f"J{joint + 1} endpoint acceleration not near zero"
                 )
 
+    timing_profiles = [
+        evaluate_actual_time_timing_profile(
+            artifact,
+            config,
+            [1.0 / artifact.sample_rate_hz],
+            profile_name="nominal",
+        ),
+        evaluate_actual_time_timing_profile(
+            artifact,
+            config,
+            [0.010, 0.013],
+            profile_name="alternating_10_13_ms",
+        ),
+    ]
+    measured_timing_path = config.get("measured_timing_csv")
+    if measured_timing_path:
+        timing_path = Path(str(measured_timing_path))
+        with timing_path.open("r", encoding="utf-8", newline="") as stream:
+            timing_rows = list(csv.DictReader(stream))
+        measured_intervals = [
+            int(row["actual_dispatch_interval_ns"]) * 1e-9
+            for row in timing_rows
+            if row.get("control_mode") == "excitation"
+            and row.get("command_valid") == "1"
+            and row.get("actual_dispatch_interval_ns") not in (None, "")
+        ]
+        measured_report = evaluate_actual_time_timing_profile(
+            artifact,
+            config,
+            measured_intervals,
+            profile_name="A_run02_measured_dispatch_intervals",
+            repeat_profile_to_endpoint=False,
+        )
+        measured_report["source_csv"] = str(timing_path)
+        measured_report["source_sha256"] = sha256_file(timing_path)
+        timing_profiles.append(measured_report)
+    for timing_report in timing_profiles:
+        if timing_report["status"] != "PASS":
+            failures.append(
+                f"timing replay {timing_report['profile']} failed: "
+                f"{timing_report['failure']}"
+            )
+
     return {
-        "schema_version": "rebot_trajectory_preview_report_v1",
+        "schema_version": "rebot_trajectory_preview_report_v2",
+        "trajectory_replay_mode": TRAJECTORY_REPLAY_MODE,
         "trajectory_sha256": artifact.sha256,
         "artifact_schema_version": SCHEMA_VERSION,
         "preview_status": "PASS" if not failures else "FAIL",
@@ -416,6 +599,11 @@ def qualify_replay_artifact(
         "sample_count": len(artifact.samples),
         "duration_s": artifact.duration_s,
         "sample_rate_hz": artifact.sample_rate_hz,
+        "continuous_check_subdivisions_per_interval": density,
+        "continuous_path_sample_count": len(dense_targets),
+        "continuous_quintic_collision_precheck": collision_status,
+        "continuous_quintic_collision_precheck_sample_count": collision_count,
+        "timing_replay_reports": timing_profiles,
         "maximum_servo_target_delta_rad": max_target_delta,
         "servo_target_delta_design_limit_rad": design_target_delta,
         "servo_target_delta_design_status": (
@@ -430,9 +618,7 @@ def qualify_replay_artifact(
                 else "FAIL"
             )
         ),
-        "jerk_method": (
-            "forward_difference_of_stored_qdd_on_fixed_artifact_grid"
-        ),
+        "jerk_method": "analytic_third_derivative_of_piecewise_quintic",
         "source_controller_precheck": artifact.metadata.get(
             "source_controller_precheck"
         ),
@@ -456,7 +642,7 @@ def validate_replay_runtime_limits(
     artifact: ReplayArtifact,
     config: dict[str, Any],
 ) -> dict[str, Any]:
-    """Fail closed on the exact frozen samples before any client is created."""
+    """Fail closed on the entire approved quintic path before creating a client."""
 
     lower = _six_limit(config, "joint_position_min_rad")
     upper = _six_limit(config, "joint_position_max_rad")
@@ -466,6 +652,23 @@ def validate_replay_runtime_limits(
     max_target_delta = float(config["maximum_servo_target_delta_rad"])
     if not math.isfinite(max_target_delta) or max_target_delta <= 0.0:
         raise ValueError("maximum_servo_target_delta_rad must be positive and finite")
+    if config.get("trajectory_replay_mode") != TRAJECTORY_REPLAY_MODE:
+        raise ValueError(
+            f"trajectory_replay_mode must be {TRAJECTORY_REPLAY_MODE}"
+        )
+    density = int(config.get("continuous_check_subdivisions_per_interval", 10))
+    if density < 2:
+        raise ValueError("continuous_check_subdivisions_per_interval must be at least 2")
+    if artifact.metadata.get("continuous_quintic_collision_precheck") != "PASS":
+        raise ValueError("artifact lacks a PASS continuous quintic collision precheck")
+    expected_collision_count = (len(artifact.samples) - 1) * density + 1
+    if (
+        int(artifact.metadata.get("continuous_quintic_collision_subdivisions_per_interval", -1))
+        < density
+        or int(artifact.metadata.get("continuous_quintic_collision_precheck_sample_count", -1))
+        < expected_collision_count
+    ):
+        raise ValueError("artifact continuous quintic collision precheck is too sparse")
 
     control_rate = float(config["control_rate_hz"])
     if not math.isfinite(control_rate) or control_rate <= 0:
@@ -496,12 +699,45 @@ def validate_replay_runtime_limits(
             f"expectation {expected_sample_count}"
         )
 
-    dt = 1.0 / artifact.sample_rate_hz
     max_seen_jerk = [0.0] * JOINT_COUNT
     max_seen_target_delta = [0.0] * JOINT_COUNT
     max_seen_target_delta_sample_index = [0] * JOINT_COUNT
     previous_q = artifact.q_start
     for sample_index, sample in enumerate(artifact.samples):
+        for joint in range(JOINT_COUNT):
+            if sample.q_ref[joint] < lower[joint] or sample.q_ref[joint] > upper[joint]:
+                raise ValueError(
+                    f"artifact sample {sample_index} J{joint + 1} violates position limits"
+                )
+            if abs(sample.qd_ref[joint]) > max_qd[joint] + 1e-12:
+                raise ValueError(
+                    f"artifact sample {sample_index} J{joint + 1} violates velocity limit"
+                )
+            if abs(sample.qdd_ref[joint]) > max_qdd[joint] + 1e-12:
+                raise ValueError(
+                    f"artifact sample {sample_index} J{joint + 1} violates acceleration limit"
+                )
+            target_delta = abs(sample.q_ref[joint] - previous_q[joint])
+            if target_delta > max_seen_target_delta[joint]:
+                max_seen_target_delta[joint] = target_delta
+                max_seen_target_delta_sample_index[joint] = sample_index
+            if target_delta > max_target_delta + 1e-12:
+                raise ValueError(
+                    f"artifact sample {sample_index} J{joint + 1} target delta "
+                    f"{target_delta:.9g} rad exceeds lower ServoCore fixed gate "
+                    f"{max_target_delta:.9g} rad"
+                )
+        previous_q = sample.q_ref
+    dense_targets = [
+        resample_actual_time_quintic(
+            artifact,
+            left.time + (right.time - left.time) * subdivision / density,
+        )
+        for left, right in zip(artifact.samples, artifact.samples[1:])
+        for subdivision in range(density)
+    ]
+    dense_targets.append(resample_actual_time_quintic(artifact, artifact.duration_s))
+    for sample_index, sample in enumerate(dense_targets):
         for joint in range(JOINT_COUNT):
             if (
                 sample.q_ref[joint] < lower[joint]
@@ -521,24 +757,7 @@ def validate_replay_runtime_limits(
                     f"artifact sample {sample_index} J{joint + 1} "
                     "violates acceleration limit"
                 )
-            target_delta = abs(sample.q_ref[joint] - previous_q[joint])
-            if target_delta > max_seen_target_delta[joint]:
-                max_seen_target_delta[joint] = target_delta
-                max_seen_target_delta_sample_index[joint] = sample_index
-            if target_delta > max_target_delta + 1e-12:
-                raise ValueError(
-                    f"artifact sample {sample_index} J{joint + 1} target delta "
-                    f"{target_delta:.9g} rad exceeds lower ServoCore fixed gate "
-                    f"{max_target_delta:.9g} rad"
-                )
-        previous_q = sample.q_ref
-        if sample_index == 0:
-            continue
-        previous = artifact.samples[sample_index - 1]
-        for joint in range(JOINT_COUNT):
-            jerk = abs(
-                (sample.qdd_ref[joint] - previous.qdd_ref[joint]) / dt
-            )
+            jerk = abs(sample.jerk_ref[joint])
             max_seen_jerk[joint] = max(max_seen_jerk[joint], jerk)
             if jerk > max_jerk[joint] + 1e-9:
                 raise ValueError(
@@ -551,9 +770,9 @@ def validate_replay_runtime_limits(
         "sample_count": len(artifact.samples),
         "sample_rate_hz": artifact.sample_rate_hz,
         "duration_s": artifact.duration_s,
-        "jerk_method": (
-            "forward_difference_of_stored_qdd_on_fixed_artifact_grid"
-        ),
+        "trajectory_replay_mode": TRAJECTORY_REPLAY_MODE,
+        "continuous_path_sample_count": len(dense_targets),
+        "jerk_method": "analytic_third_derivative_of_piecewise_quintic",
         "jerk_abs_max": max_seen_jerk,
         "servo_target_delta_abs_max": max_seen_target_delta,
         "servo_target_delta_abs_max_sample_index": max_seen_target_delta_sample_index,
@@ -561,6 +780,121 @@ def validate_replay_runtime_limits(
             max_target_delta - value for value in max_seen_target_delta
         ],
         "maximum_servo_target_delta_rad": max_target_delta,
+    }
+
+
+def evaluate_actual_time_timing_profile(
+    artifact: ReplayArtifact,
+    config: dict[str, Any],
+    dispatch_intervals_s: list[float] | tuple[float, ...],
+    *,
+    profile_name: str,
+    repeat_profile_to_endpoint: bool = True,
+) -> dict[str, Any]:
+    """Offline replay of the same packet finite-difference envelope used at runtime."""
+
+    intervals = tuple(float(value) for value in dispatch_intervals_s)
+    if not intervals or not all(math.isfinite(value) and value > 0.0 for value in intervals):
+        raise ValueError("dispatch timing profile requires positive finite intervals")
+    lower = _six_limit(config, "joint_position_min_rad")
+    upper = _six_limit(config, "joint_position_max_rad")
+    velocity_limit = _six_limit(config, "maximum_command_velocity_rad_s")
+    acceleration_limit = _six_limit(config, "maximum_command_acceleration_rad_s2")
+    jerk_limit = _six_limit(config, "maximum_command_jerk_rad_s3")
+    delta_limit = float(config["maximum_servo_target_delta_rad"])
+    minimum_dt = float(config.get("minimum_servo_timestamp_interval_s", 0.0005))
+    maximum_dt = float(config.get("maximum_servo_timestamp_interval_s", 0.1))
+    maxima = {name: [0.0] * JOINT_COUNT for name in ("delta_q", "qd", "qdd", "jerk")}
+    previous_q = artifact.q_start
+    previous_qd = (0.0,) * JOINT_COUNT
+    previous_qdd = (0.0,) * JOINT_COUNT
+    trajectory_time = 0.0
+    command_count = 0
+    interval_cursor = 0
+    failure: dict[str, Any] | None = None
+    while True:
+        dt = (
+            intervals[interval_cursor % len(intervals)]
+            if repeat_profile_to_endpoint or interval_cursor < len(intervals)
+            else 1.0 / artifact.sample_rate_hz
+        )
+        interval_cursor += 1
+        target = resample_actual_time_quintic(artifact, trajectory_time)
+        delta = tuple(target.q_ref[j] - previous_q[j] for j in range(JOINT_COUNT))
+        qd = tuple(value / dt for value in delta)
+        qdd = tuple((qd[j] - previous_qd[j]) / dt for j in range(JOINT_COUNT))
+        jerk = tuple((qdd[j] - previous_qdd[j]) / dt for j in range(JOINT_COUNT))
+        if dt < minimum_dt or dt > maximum_dt:
+            failure = {
+                "quantity": "timestamp_interval_s",
+                "joint": None,
+                "value": dt,
+                "limit": minimum_dt if dt < minimum_dt else maximum_dt,
+                "trajectory_time_s": trajectory_time,
+            }
+        for joint in range(JOINT_COUNT):
+            for name, values in (("delta_q", delta), ("qd", qd), ("qdd", qdd), ("jerk", jerk)):
+                maxima[name][joint] = max(maxima[name][joint], abs(values[joint]))
+            checks = (
+                ("position_rad", target.q_ref[joint], lower[joint], upper[joint]),
+                ("delta_q_rad", abs(delta[joint]), 0.0, delta_limit),
+                ("qd_rad_s", abs(qd[joint]), 0.0, velocity_limit[joint]),
+                ("qdd_rad_s2", abs(qdd[joint]), 0.0, acceleration_limit[joint]),
+                ("jerk_rad_s3", abs(jerk[joint]), 0.0, jerk_limit[joint]),
+            )
+            for quantity, value, minimum, maximum in checks:
+                if value < minimum - 1e-12 or value > maximum + 1e-9:
+                    failure = {
+                        "quantity": quantity,
+                        "joint": joint + 1,
+                        "value": value,
+                        "limit": minimum if value < minimum else maximum,
+                        "dt_s": dt,
+                        "trajectory_time_s": trajectory_time,
+                    }
+                    break
+            if failure is not None:
+                break
+        if failure is not None:
+            break
+        previous_q, previous_qd, previous_qdd = target.q_ref, qd, qdd
+        command_count += 1
+        if trajectory_time >= artifact.duration_s:
+            break
+        next_interval = (
+            intervals[interval_cursor % len(intervals)]
+            if repeat_profile_to_endpoint or interval_cursor < len(intervals)
+            else 1.0 / artifact.sample_rate_hz
+        )
+        trajectory_time = min(
+            artifact.duration_s,
+            trajectory_time + next_interval,
+        )
+
+    per_joint = {}
+    for joint in range(JOINT_COUNT):
+        per_joint[f"J{joint + 1}"] = {
+            "delta_q_abs_max_rad": maxima["delta_q"][joint],
+            "qd_abs_max_rad_s": maxima["qd"][joint],
+            "qdd_abs_max_rad_s2": maxima["qdd"][joint],
+            "jerk_abs_max_rad_s3": maxima["jerk"][joint],
+            "delta_q_margin_rad": delta_limit - maxima["delta_q"][joint],
+            "qd_margin_rad_s": velocity_limit[joint] - maxima["qd"][joint],
+            "qdd_margin_rad_s2": acceleration_limit[joint] - maxima["qdd"][joint],
+            "jerk_margin_rad_s3": jerk_limit[joint] - maxima["jerk"][joint],
+        }
+    return {
+        "profile": profile_name,
+        "trajectory_replay_mode": TRAJECTORY_REPLAY_MODE,
+        "status": "PASS" if failure is None else "FAIL",
+        "failure": failure,
+        "timing_sample_count": len(intervals),
+        "timing_repeated_to_endpoint": repeat_profile_to_endpoint,
+        "dispatch_interval_min_s": min(intervals),
+        "dispatch_interval_max_s": max(intervals),
+        "actual_command_count": command_count,
+        "trajectory_time_end_s": trajectory_time,
+        "per_joint": per_joint,
     }
 
 
@@ -575,22 +909,30 @@ def write_preview_outputs(
     acceptance_path = Path(acceptance_path)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     acceptance_path.parent.mkdir(parents=True, exist_ok=True)
+    preview_mp4 = Path(preview_mp4)
+    if not preview_mp4.is_file():
+        raise FileNotFoundError(
+            "preview MP4 must be rendered before writing v2 acceptance"
+        )
     report_path.write_text(
         yaml.safe_dump(report, sort_keys=False, allow_unicode=True),
         encoding="utf-8",
     )
     acceptance = {
-        "schema_version": "rebot_trajectory_preview_acceptance_v1",
+        "schema_version": "rebot_trajectory_preview_acceptance_v2",
         "trajectory_sha256": report["trajectory_sha256"],
+        "trajectory_replay_mode": TRAJECTORY_REPLAY_MODE,
         "preview_report": str(report_path),
+        "preview_report_sha256": sha256_file(report_path),
         "preview_mp4": str(preview_mp4),
+        "preview_mp4_sha256": sha256_file(preview_mp4),
         "operator": "",
         "review_date": None,
         "accepted_for_hardware": False,
         "notes": (
             (
-                "Default is false. A human operator must watch the exact-command "
-                "MP4 and manually accept this exact artifact hash."
+                "Default is false. A human operator must watch the continuous-quintic "
+                "MP4 and manually accept this artifact, strategy, report and MP4 hash."
             )
             if report["preview_status"] == "PASS"
             else (
@@ -616,6 +958,7 @@ def validate_preview_acceptance(
     *,
     repo_root: str | Path,
     require_hardware_acceptance: bool = True,
+    replay_mode: str = TRAJECTORY_REPLAY_MODE,
 ) -> dict[str, Any]:
     path = Path(acceptance_path)
     if not path.is_file():
@@ -623,16 +966,25 @@ def validate_preview_acceptance(
     parsed = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(parsed, dict):
         raise ValueError("preview acceptance must be a YAML mapping")
-    if parsed.get("schema_version") != "rebot_trajectory_preview_acceptance_v1":
-        raise ValueError("unsupported preview acceptance schema")
+    if parsed.get("schema_version") != "rebot_trajectory_preview_acceptance_v2":
+        raise ValueError(
+            "preview acceptance v2 is required; v1 cannot authorize actual-time replay"
+        )
     if parsed.get("trajectory_sha256") != artifact.sha256:
         raise PermissionError(
             "preview acceptance hash does not match trajectory artifact"
         )
+    if parsed.get("trajectory_replay_mode") != replay_mode:
+        raise PermissionError("preview acceptance replay strategy mismatch")
     if require_hardware_acceptance and parsed.get("accepted_for_hardware") is not True:
         raise PermissionError(
             "preview acceptance is not accepted_for_hardware=true"
         )
+    if require_hardware_acceptance:
+        if not str(parsed.get("operator", "")).strip() or not parsed.get("review_date"):
+            raise PermissionError(
+                "preview acceptance lacks human operator or review_date"
+            )
 
     root = Path(repo_root)
     report_path = _resolve_evidence_path(
@@ -647,6 +999,10 @@ def validate_preview_acceptance(
         raise PermissionError("preview acceptance report file is missing")
     if not mp4_path.is_file():
         raise PermissionError("preview acceptance MP4 file is missing")
+    if parsed.get("preview_report_sha256") != sha256_file(report_path):
+        raise PermissionError("preview acceptance report hash mismatch")
+    if parsed.get("preview_mp4_sha256") != sha256_file(mp4_path):
+        raise PermissionError("preview acceptance MP4 hash mismatch")
 
     report = yaml.safe_load(report_path.read_text(encoding="utf-8"))
     if not isinstance(report, dict):
@@ -655,6 +1011,12 @@ def validate_preview_acceptance(
         raise PermissionError(
             "preview report hash does not match trajectory artifact"
         )
+    if report.get("schema_version") != "rebot_trajectory_preview_report_v2":
+        raise PermissionError("preview report v2 is required")
+    if report.get("trajectory_replay_mode") != replay_mode:
+        raise PermissionError("preview report replay strategy mismatch")
+    if report.get("continuous_quintic_collision_precheck") != "PASS":
+        raise PermissionError("preview report continuous collision precheck is not PASS")
     if report.get("preview_status") != "PASS":
         raise PermissionError("preview report is not PASS")
     return parsed

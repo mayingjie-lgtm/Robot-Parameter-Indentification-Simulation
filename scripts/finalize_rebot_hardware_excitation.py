@@ -70,8 +70,8 @@ def _mock_replay_summary(run_dir: Path, artifact) -> dict[str, object]:
             )
     if float(metadata.get("control_rate_hz", 0.0)) != expected_rate:
         raise ValueError("mock replay control rate does not match frozen artifact")
-    if int(metadata.get("observed_sample_count", -1)) != expected_count:
-        raise ValueError("mock replay sample count does not match frozen artifact")
+    if int(metadata.get("observed_sample_count", -1)) <= 0:
+        raise ValueError("mock replay contains no accepted excitation commands")
 
     timing = metadata.get("dispatch_timing") or {}
     nominal_period_ns = int(round(1_000_000_000.0 / expected_rate))
@@ -86,9 +86,12 @@ def _mock_replay_summary(run_dir: Path, artifact) -> dict[str, object]:
     if int(timing.get("command_dispatch_timestamp_mismatch_count", -1)) != 0:
         raise ValueError("mock replay command dispatch timestamps do not match commands")
     replay_semantics = str(timing.get("replay_semantics", ""))
-    for phrase in ("exact frozen q_ref sequence", "no runner resampling", "no catch-up burst"):
+    for phrase in ("continuous quintic path", "real dispatch time", "no catch-up burst"):
         if phrase not in replay_semantics:
             raise ValueError(f"mock replay semantics missing required phrase: {phrase}")
+    envelope = metadata.get("runtime_servo_envelope") or {}
+    if envelope.get("strategy") != "actual_time_quintic_v1":
+        raise ValueError("mock replay runtime envelope strategy mismatch")
 
     upper_gate = metadata.get("upper_safety_gate") or {}
     if upper_gate.get("tracking_error_semantics") != "monitor_only_quality_warning":
@@ -100,6 +103,7 @@ def _mock_replay_summary(run_dir: Path, artifact) -> dict[str, object]:
         "mock_replay_status": "PASS",
         "mock_motion_status": metadata["motion_status"],
         "mock_observed_sample_count": metadata["observed_sample_count"],
+        "mock_trajectory_time_end_s": envelope.get("trajectory_time_end_s"),
         "mock_catch_up_burst_count": timing["catch_up_burst_count"],
         "mock_command_dispatch_timestamp_mismatch_count": timing[
             "command_dispatch_timestamp_mismatch_count"
@@ -191,18 +195,17 @@ def finalize(run_dir: Path, renderer: Path, qualification_config: Path) -> None:
     preview_report = run_dir / "preview_report.yaml"
     acceptance = run_dir / "preview_acceptance.yaml"
     preview_mp4 = run_dir / "preview.mp4"
-    write_preview_outputs(
-        report=report,
-        report_path=preview_report,
-        acceptance_path=acceptance,
-        preview_mp4=preview_mp4,
-    )
-
     subprocess.run(
         [str(renderer), "--input", str(trajectory), "--output", str(preview_mp4)],
         cwd=ROOT,
         env=_renderer_env(),
         check=True,
+    )
+    write_preview_outputs(
+        report=report,
+        report_path=preview_report,
+        acceptance_path=acceptance,
+        preview_mp4=preview_mp4,
     )
 
     acceptance_data = yaml.safe_load(acceptance.read_text(encoding="utf-8"))
@@ -218,6 +221,7 @@ def finalize(run_dir: Path, renderer: Path, qualification_config: Path) -> None:
         output_csv=str(run_dir / "mock_replay.csv"),
         allow_hardware=False,
         allow_motion=True,
+        trajectory_replay_mode="actual_time_quintic_v1",
         trajectory_hash=artifact.sha256,
         trajectory_artifact=_repo_relative(trajectory),
         trajectory_metadata=_repo_relative(metadata),
@@ -252,7 +256,7 @@ def finalize(run_dir: Path, renderer: Path, qualification_config: Path) -> None:
         "numerical_qualification": report["preview_status"],
         "design_target_status": report["servo_target_delta_design_status"],
         "collision_precheck": report.get("collision_precheck"),
-        "preview_method": "exact_command_zero_order_hold",
+        "preview_method": "actual_time_quintic_v1_continuous_path",
         "preview_mp4": _repo_relative(preview_mp4),
         "preview_report": _repo_relative(preview_report),
         "preview_acceptance": _repo_relative(acceptance),

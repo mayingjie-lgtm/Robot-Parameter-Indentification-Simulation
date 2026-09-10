@@ -240,10 +240,12 @@ hardware experiment schema，注入接收抖动和重复反馈。metadata 明确
   --output-directory results/rebot_real_ab
 ```
 
-每条轨迹生成 `trajectory.csv`、系数和 provenance、数值报告、`preview.mp4`、
+每条轨迹生成 `trajectory.csv`、系数和 provenance、连续路径数值/碰撞/时序报告、`preview.mp4`、
 `preview_acceptance.yaml` 和 `hardware.pending.yaml`。A 固定 seed `20260826` /
 attempt `6`，B 固定 seed `20260829` / attempt `21`；系数哈希按 Phase 5B 基线核验。
-每条 30 秒、100 Hz 候选采样、3001 点。无显示环境可加 `--skip-video`，之后仍需生成视频。
+每条 30 秒、100 Hz 候选采样、3001 个 knot。`actual_time_quintic_v1` 在 nominal
+时序下精确命中这些 knot，在 ACK 抖动下沿同一 C2 路径按真实时间重采样。无显示环境可加
+`--skip-video`，但不会生成可用于硬件的 v2 acceptance；之后仍需生成视频并人工签收。
 
 模板保留 `allow_hardware: false`、`allow_motion: false`、未确认映射和实机模板限值；
 不会从 Mock 复制宽松限值，也不会自动签收。模板是采集准备材料，**不是可直接启用的实机配置**。

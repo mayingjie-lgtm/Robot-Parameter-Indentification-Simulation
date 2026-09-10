@@ -32,6 +32,7 @@ def read_metadata(csv_path: str | Path) -> dict[str, Any]:
     supported_schemas = {
         "rebot_hardware_experiment_v1",
         "rebot_hardware_experiment_v2",
+        "rebot_hardware_experiment_v3",
     }
     if not isinstance(meta, dict) or meta.get("schema_version") not in supported_schemas:
         raise ValueError(f"{path}: expected supported rebot hardware experiment metadata")

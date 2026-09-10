@@ -58,6 +58,9 @@ class HardwareExperimentRecorderTest(unittest.TestCase):
         self.assertIn("actual_dispatch_interval_ns", CSV_COLUMNS)
         self.assertIn("reference_dispatch_skew_ns", CSV_COLUMNS)
         self.assertIn("state_snapshot_age_ms", CSV_COLUMNS)
+        self.assertIn("trajectory_time_s", CSV_COLUMNS)
+        self.assertIn("trajectory_interval_index", CSV_COLUMNS)
+        self.assertIn("trajectory_interval_ratio", CSV_COLUMNS)
         self.assertIn("command_valid", CSV_COLUMNS)
         self.assertIn("control_mode", CSV_COLUMNS)
 

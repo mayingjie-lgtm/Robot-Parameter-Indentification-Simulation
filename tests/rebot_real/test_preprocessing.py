@@ -56,6 +56,22 @@ def test_analytic_derivative_and_duplicate_feedback(tmp_path):
         preprocess(raw, tmp_path / "processed.csv")
 
 
+@pytest.mark.parametrize("schema", [
+    "rebot_hardware_experiment_v1",
+    "rebot_hardware_experiment_v2",
+    "rebot_hardware_experiment_v3",
+])
+def test_raw_schema_versions_remain_preprocessing_compatible(tmp_path, schema):
+    raw = write_signal(tmp_path)
+    metadata_path = raw.with_suffix(".meta.yaml")
+    metadata = yaml.safe_load(metadata_path.read_text())
+    metadata["schema_version"] = schema
+    metadata_path.write_text(yaml.safe_dump(metadata, sort_keys=False))
+    report = preprocess(raw, tmp_path / f"processed_{schema}.csv")
+    assert report["raw_metadata"]["schema_version"] == schema
+    assert report["qdd_source"] == "derivative_of_zero_phase_filtered_sdk_qd"
+
+
 @pytest.mark.parametrize('column', ['timestamp_host_rx_ns', 'timestamp_lower_ns'])
 def test_timestamp_rollback_rejected(tmp_path, column):
     raw = write_signal(tmp_path)

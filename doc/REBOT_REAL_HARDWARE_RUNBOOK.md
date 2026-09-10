@@ -691,7 +691,7 @@ PASS 条件：
 - MoveJ target/状态只进入 metadata 的 `preposition` 证据，不进入 frozen artifact，也不算作 `command_valid=true/control_mode=excitation` 的辨识样本；
 - Mock excitation 可从 `[0, 0, 0, 0, 0, pi/2]` 近似停放姿态开始，用 deterministic clock 完整 replay，不需要真实等待 30 s。
 
-当前软件链已经接通到 **frozen artifact -> qualification -> exact-command preview gate -> SDK MoveJ preposition -> q0 verification -> matching-hash replay**。
+当前软件链已经接通到 **frozen artifact -> continuous-quintic qualification -> v2 preview gate -> SDK MoveJ preposition -> q0 verification -> actual-time replay**。
 2026-09-09 的 A_run03 进一步证明：公开 `ArmClient.servo_joint()` 同步等待 TCP accept/reject，实际 command dispatch 约为 100 Hz，而不是配置中的 200 Hz；旧 5 ms fixed-reference timestamp 因而累计了约 1.515 s skew。runner 现已改为发送真实 dispatch monotonic timestamp，普通 excitation tracking lag 只记录为质量证据，不再单独触发失能。
 
 历史 A 已从**同一组 C++ Fourier 系数直接在 100 Hz fixed grid 重新评价**为 3001 点、30 s frozen artifact，未从 200 Hz CSV 抽样。其 coefficient SHA 为 `86a5481c0c2459bb6e3f01d0aee4c247f4f0ed71aa444f77b6d1458c1f7cd529`，trajectory SHA 为 `81be01bbfa44b933c194d9bb6d5755b4efb81bff9bfc0008020e1efba394d8e9`。该 old A 的 position、velocity、acceleration、jerk、start/end continuity 和 collision/model precheck 都 PASS；唯一 blocking qualification 是 J4 在 sample 1164 的相邻 frozen target delta `0.0034906093335972943 rad` 超过 Lower 固定 `0.003125 rad` ServoCore 单包 target-jump gate，margin 为 `-0.00036560933359729413 rad`。这个 `0.003125 rad` 是固定 per-packet target jump gate，不是 tracking-error gate。
@@ -715,9 +715,14 @@ J6  0.0009089373027025838  @2341  margin 0.0022160626972974164
 
 最紧的是 J5，但仍满足 `0.002386885386 < 0.0028 < 0.003125`。`preview_report.yaml` 对 sample rate、sample count、duration、start/end continuity、position、velocity、acceleration、jerk、collision/model、Servo target delta 均为 PASS，且 `servo_target_delta_design_status: PASS`。
 
-同一 trajectory SHA 的 exact-command MP4 位于 `results/rebot_real_ab_servo_safe_100hz_optimized/A/preview.mp4`；`preview_acceptance.yaml` 仍为 `accepted_for_hardware: false`。完整 Mock replay 已按 100 Hz 执行 3001 个 frozen `q_ref` sample，`motion_status: completed`、`catch_up_burst_count=0`、`command_dispatch_timestamp_mismatch_count=0`，并明确记录 `exact frozen q_ref sequence; no runner resampling; no catch-up burst`。普通 excitation tracking lag 继续是 `monitor_only_quality_warning`，不会单独立即 fail-safe；stale/invalid feedback、primary fault、unsafe safety state、Servo reject/command failure、state snapshot stale 仍保持立即 fail-safe。
+该目录中的 MP4 和 v1 acceptance 是历史 fixed-sample 证据，不能授权
+`actual_time_quintic_v1`。新模式在 nominal 100 Hz Mock 下仍精确发送 3001 个 knot；
+在 A_run02 实测间隔前缀和完整 `10/13 ms` 交替抖动中按真实 elapsed time 重采样，
+均覆盖精确 30 s 且通过本地 `Δq/qd/qdd/jerk` 门禁。普通 excitation tracking lag
+继续是 `monitor_only_quality_warning`；反馈/故障/ownership/SDK reject 仍立即 fail-safe。
 
-真实 A 尚未授权、尚未执行。下一人工停止点仍是观看上述 exact-command `preview.mp4`，并且只能对 trajectory SHA `be2faa1d58fc834efbca030aea7ec9fbb28d57895aae8e449f36164e6141f131` 手工决定 acceptance。SDK MoveJ 只允许作为通过全部前置门禁后的 q0 预定位手段。
+真实 A 尚未授权、尚未执行。必须重新导出带高密度连续碰撞检查的 artifact metadata、
+重新生成连续五次路径 MP4/report，并由操作者签署 v2 acceptance 后才能连接硬件。
 
 ### 8.2 强制门禁：真机轨迹必须先离线可视化
 
@@ -735,14 +740,14 @@ offline numeric qualification
         |  start continuity / duration / rate
         |  model/collision checks where available
         v
-exact-command visual preview
+actual_time_quintic_v1 continuous-path preview
         |  reBot model animation / MP4
         v
 optional MuJoCo dynamic preview
         |  q_ref vs simulated q tracking
         v
 preview_acceptance record
-        |  accepted artifact hash
+        |  artifact / strategy / report / MP4 hashes
         v
 RebotHardwareRunner loads the SAME artifact/hash
         |
@@ -750,20 +755,20 @@ RebotHardwareRunner loads the SAME artifact/hash
 SDK MoveJ preposition to artifact q_ref[0]
         |  fresh feedback + position/settle verification
         v
-exact frozen Servo replay
+real-dispatch-time quintic Servo replay
 ```
 
 这里必须区分两种预览：
 
-1. **exact-command preview（必做）**：动画直接使用将来要发送的 `q_ref(t)`，用于肉眼检查机械臂是否出现
+1. **continuous-path preview（必做）**：动画使用 `q/qd/qdd` 五次 Hermite 连续路径，用于肉眼检查机械臂是否出现
    大幅甩动、奇怪折叠、接近限位、明显不符合预期的姿态；
 2. **dynamic simulation preview（推荐）**：使用同一份系数/artifact 在 MuJoCo 中执行，查看控制跟踪、
    actuator saturation/contact 等仿真现象。它可以发现动力学问题，但不能代替 exact-command preview。
 
 现有 `rebot_trajectory_renderer` 已直接接受统一的 replay schema：
-`time/q_ref0..5/qd_ref0..5/qdd_ref0..5`。replay 模式直接把 frozen `q_ref` 写入 MuJoCo qpos 后
-调用 `mj_forward()`，并按 zero-order hold 生成视频；不会调用 `mj_step()`，也不会在视频侧插值出
-第二条轨迹。simulation-truth schema 仍保留用于 dynamic simulation actual-q 回放。
+`time/q_ref0..5/qd_ref0..5/qdd_ref0..5`。replay 模式用与 runner 同公式的五次 Hermite
+插值后写入 MuJoCo qpos 并调用 `mj_forward()`；不会调用 `mj_step()`。simulation-truth
+schema 仍保留用于 dynamic simulation actual-q 回放。
 
 每次 preview 至少生成并保存：
 
@@ -791,7 +796,8 @@ sample_rate
 collision/precheck result（若模型可用）
 ```
 
-`preview_acceptance.yaml` 至少记录：artifact SHA-256、report/MP4 路径、操作者、日期和
+v2 `preview_acceptance.yaml` 至少记录：artifact SHA-256、`actual_time_quintic_v1`、
+report/MP4 路径及各自 SHA-256、操作者、日期和
 `accepted_for_hardware: true/false`。硬件 runner 在 excitation 模式必须读取该 acceptance，验证 hash
 与实际加载 artifact 完全一致；hash 不一致或未接受时 fail closed。**看过 A 的视频不能授权 B，缩放或
 修改任何系数后也必须重新生成 preview 和 acceptance。**
@@ -805,6 +811,505 @@ collision/precheck result（若模型可用）
 ```
 
 但这个视频回放的是仿真实际 `q`，目前只能作为视觉参考，不能作为未来真机 artifact 的最终预览验收。
+
+### 8.2.1 2026-09-09 optimized A：v2 preview 到 30 s 真机采集的手动 SOP
+
+本小节把当前 optimized A 的最后人工交接步骤集中到一处。它覆盖：
+
+1. 在正式输出目录重新生成 trajectory metadata、v2 preview report 和 MP4；
+2. 人工观看 MP4，并填写 operator/date 后显式接受；
+3. 运行完整仓库测试，而不是只跑本轮相关测试；
+4. 真机前确认历史故障 `500115` 已清除且持续不活动；
+5. 从 pending 模板复制到**新的**运行目录，再显式打开硬件/运动授权；
+6. 执行 A，并核查 runtime envelope、dispatch timing、实际命令数和完整 30 s 数据。
+
+这里的正式 A 目录固定为：
+
+```bash
+cd /home/j/j_ws/src/Robot-Parameter-Indentification-Simulation
+
+export SDK_ROOT=/home/j/j_ws/src/wlsea_rebot_b601_upper_20260904
+export ORIN_IP=192.168.50.24
+export TCP_PORT=5000
+export UDP_PORT=5001
+
+export A_DIR="$PWD/results/rebot_real_ab_servo_safe_100hz_optimized/A"
+export A_SHA=be2faa1d58fc834efbca030aea7ec9fbb28d57895aae8e449f36164e6141f131
+export A_COEFF_SHA=d7c492ce56d7f7fb02b001bf9505c78679fa5f8a8f2f9488e4b5234a96fe9289
+```
+
+上面两个 SHA 是当前 `seed=20260918, attempt=18` 的冻结证据。任一 SHA 因重新搜索、
+系数变化或轨迹变化而改变时，**本节后续 acceptance 和 hardware config 必须全部重新生成，
+不得继续沿用这些值。**
+
+#### Step 1：在正式输出目录重新生成 metadata、preview report 和 MP4
+
+先重新构建当前 exporter/renderer：
+
+```bash
+cmake -S . -B build_rebot
+cmake --build build_rebot --parallel 2
+```
+
+然后从**同一份已冻结 C++ coefficients** 重新导出 100 Hz / 30 s trajectory。这里允许覆盖
+`A_DIR` 中由同一 coefficients 派生的 artifact/metadata/preview 产物；不要修改任何历史
+`data/rebot_real/.../A_runXX/*.yaml`。
+
+当前正式 A 目录还可能保留旧 fixed-sample Mock 的 `mock_replay.csv/.meta.yaml/.yaml`。
+新的 finalizer 会校验**已有** Mock metadata；如果旧文件仍写着
+`exact frozen q_ref sequence; no runner resampling`，它会正确拒绝把这份 v1 Mock 证据当成
+`actual_time_quintic_v1`。因此在首次 v2 finalization 前先**归档而不是删除**旧 Mock：
+
+```bash
+if [ -f "$A_DIR/mock_replay.meta.yaml" ]; then
+  mkdir -p "$A_DIR/legacy_fixed_sample_mock"
+  for f in mock_replay.csv mock_replay.meta.yaml mock_replay.yaml; do
+    if [ -f "$A_DIR/$f" ]; then
+      mv "$A_DIR/$f" "$A_DIR/legacy_fixed_sample_mock/$f"
+    fi
+  done
+fi
+```
+
+然后重新导出和 finalization：
+
+```bash
+./build_rebot/rebot_trajectory_exporter \
+  --coefficients "$A_DIR/coefficients.csv" \
+  --output "$A_DIR/trajectory.csv" \
+  --metadata "$A_DIR/trajectory.meta.yaml" \
+  --controller-config config/rebot_dm_excitation_controller.yaml \
+  --model rebot_dm/scene_runtime.xml \
+  --sample-rate-hz 100 \
+  --duration 30 \
+  --seed 20260918 \
+  --accepted-attempt 18 \
+  --expected-coefficient-sha256 "$A_COEFF_SHA" \
+  --overwrite
+
+python3 scripts/finalize_rebot_hardware_excitation.py \
+  --run-directory "$A_DIR" \
+  --renderer build_rebot/rebot_trajectory_renderer \
+  --qualification-config config/rebot_trajectory_preview.yaml
+```
+
+`finalize_rebot_hardware_excitation.py` 必须保持 fail-closed：它生成 v2 acceptance 模板，
+但**不会**替操作者把 `accepted_for_hardware` 改为 true。
+
+重新生成后执行只读核查：
+
+```bash
+python3 - "$A_DIR" "$A_SHA" <<'PY'
+from pathlib import Path
+import sys, yaml
+
+root = Path(sys.argv[1])
+expected_sha = sys.argv[2]
+meta = yaml.safe_load((root / "trajectory.meta.yaml").read_text())
+report = yaml.safe_load((root / "preview_report.yaml").read_text())
+accept = yaml.safe_load((root / "preview_acceptance.yaml").read_text())
+
+assert meta["trajectory_sha256"] == expected_sha
+assert meta["sample_rate_hz"] == 100
+assert meta["sample_count"] == 3001
+assert meta["duration_s"] == 30
+assert meta["continuous_quintic_collision_precheck"] == "PASS"
+
+assert report["schema_version"] == "rebot_trajectory_preview_report_v2"
+assert report["trajectory_sha256"] == expected_sha
+assert report["trajectory_replay_mode"] == "actual_time_quintic_v1"
+assert report["preview_status"] == "PASS"
+assert report["continuous_quintic_collision_precheck"] == "PASS"
+
+assert accept["schema_version"] == "rebot_trajectory_preview_acceptance_v2"
+assert accept["trajectory_sha256"] == expected_sha
+assert accept["trajectory_replay_mode"] == "actual_time_quintic_v1"
+assert accept["accepted_for_hardware"] is False
+
+print("STEP1 PASS")
+print("trajectory_sha256 =", expected_sha)
+print("continuous_collision_samples =",
+      meta["continuous_quintic_collision_precheck_sample_count"])
+print("preview_mp4 =", accept["preview_mp4"])
+PY
+```
+
+如果这里的 SHA、v2 schema、continuous collision precheck、100 Hz、3001 knots 或 30 s
+有任何一项不一致，停止，不进入人工 acceptance。
+
+#### Step 2：人工观看新 MP4，并签署 v2 acceptance
+
+必须实际观看：
+
+```text
+results/rebot_real_ab_servo_safe_100hz_optimized/A/preview.mp4
+```
+
+可以使用本机任意播放器，例如：
+
+```bash
+xdg-open "$A_DIR/preview.mp4"
+```
+
+人工至少确认：
+
+- MoveJ 预定位之后的 excitation 起点姿态合理；
+- 连续五次路径没有突跳、甩动或肉眼可见的不连续；
+- 无明显自碰、环境碰撞、奇怪折叠或逼近机械限位的动作；
+- 视频对应的就是当前 `A_SHA`，不是旧 MP4。
+
+观看完成后，**只编辑当前正式 A 的 v2 acceptance**。示例：
+
+```bash
+export OPERATOR="<填写实际操作者>"
+export REVIEW_DATE="$(date +%F)"
+
+python3 - "$A_DIR/preview_acceptance.yaml" "$OPERATOR" "$REVIEW_DATE" <<'PY'
+from pathlib import Path
+import sys, yaml
+
+path = Path(sys.argv[1])
+operator = sys.argv[2].strip()
+review_date = sys.argv[3].strip()
+if not operator:
+    raise SystemExit("operator must not be empty")
+
+cfg = yaml.safe_load(path.read_text())
+if cfg.get("schema_version") != "rebot_trajectory_preview_acceptance_v2":
+    raise SystemExit("refusing to accept: preview acceptance is not v2")
+if cfg.get("trajectory_replay_mode") != "actual_time_quintic_v1":
+    raise SystemExit("refusing to accept: replay mode mismatch")
+
+cfg["operator"] = operator
+cfg["review_date"] = review_date
+cfg["accepted_for_hardware"] = True
+cfg["notes"] = (
+    "Human-reviewed continuous-quintic preview; accepted only for the "
+    "matching trajectory/report/MP4 hashes recorded in this file."
+)
+
+path.write_text(
+    yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True),
+    encoding="utf-8",
+)
+PY
+```
+
+随后立即验证 acceptance 自己保存的 report/MP4 hash 仍匹配：
+
+```bash
+PYTHONPATH="$PWD/src" python3 - "$A_DIR" <<'PY'
+from pathlib import Path
+import sys
+from rebot_real.trajectory_artifact import (
+    load_replay_artifact,
+    validate_preview_acceptance,
+)
+
+root = Path(sys.argv[1])
+artifact = load_replay_artifact(
+    root / "trajectory.csv",
+    root / "trajectory.meta.yaml",
+)
+accepted = validate_preview_acceptance(
+    root / "preview_acceptance.yaml",
+    artifact,
+    repo_root=Path.cwd(),
+    require_hardware_acceptance=True,
+)
+print("STEP2 PASS")
+print("operator =", accepted["operator"])
+print("review_date =", accepted["review_date"])
+print("accepted_for_hardware =", accepted["accepted_for_hardware"])
+PY
+```
+
+不要手工重算后再改写 `preview_report_sha256` 或 `preview_mp4_sha256` 来“消除”hash mismatch；
+hash 不一致意味着证据被修改，应重新生成并重新观看。
+
+#### Step 3：跑完整仓库测试
+
+当前仓库不只包含 reBot 本轮相关测试，还包含 Piper Python regression 和 C++/CTest 门禁。
+截至 2026-09-09，`python3 -m pytest --collect-only -q` 可收集 207 个 Python tests，
+`build_rebot` 中有 5 个 CTest；数量未来可增加，因此通过条件是**全部收集到的测试均 PASS**，
+不是把 207/5 写成永久固定值。
+
+执行：
+
+```bash
+cmake -S . -B build_rebot
+cmake --build build_rebot --parallel 2
+
+/usr/bin/python3 -m pytest -q tests/rebot_real tests/piper_real
+ctest --test-dir build_rebot --output-on-failure
+```
+
+任一 Python test 或 CTest 失败，都不进入真实 A。不要因为“116 个本轮相关测试已通过”而跳过
+其他 regression。
+
+#### Step 4：确认 500115 已清除且持续不活动
+
+历史 `A_run02/raw.meta.yaml` 中，`500115` 与一次
+`status=rejected, code=1002, lower Servo safety envelope rejected target` 同时出现。
+2026-09-09 通过当前 Lower 的只读 `get_active_faults` / `fault_explain(500115)` 已确认运行时权威映射为：
+
+```text
+500115 = SERVO_COMMAND_JERK_EXCEEDED
+source = servo_target_validator
+message_zh = Servo 目标流 jerk 超限
+recovery = correct the target stream smoothing, disable motors, and explicitly reset
+```
+
+对 `A_run02` 的已接受命令和失败候选按真实 `host_timestamp_ns` 重算，失败包 J4 jerk
+约为 `43.2925 rad/s^3`，超过 Lower `40 rad/s^3` 硬门限。根因是旧固定采样点回放在同步
+Servo ACK 造成的约 `10–13 ms` 实际包间隔抖动下，真实时间差分 jerk 被放大；不是普通 tracking lag。
+同一组历史真实 dispatch 时间戳改用当前 `actual_time_quintic_v1` 重采样离线复算后，65 个包全部通过，
+最大 jerk 约 `0.8185 rad/s^3`。
+
+因此：
+
+- **不要使用 `reset_rebot_feedback_timeout.py`**，该脚本只允许复位 `200204`；
+- 先确认当前代码确实使用 `actual_time_quintic_v1`，不要再运行旧 fixed-sample replay；
+- 只允许用本仓库的 `reset_rebot_servo_jerk_fault.py` 对“唯一活动故障恰好为 500115，且 Lower 运行时名称恰好为 `SERVO_COMMAND_JERK_EXCEEDED`”的状态做一次显式复位；
+- 复位脚本不会 enable、disable、MoveJ 或 Servo，复位后必须仍确认 `robot_mode=disabled`；
+- 只要 `primary_fault=500115` 或 `active_faults` 非空，就禁止 MoveJ/Servo。
+
+先创建本次新的运行目录，但此时还不放入已授权配置：
+
+```bash
+export RUN_ID="$(date +%Y%m%d_%H%M%S)"
+export RUN_DIR="$PWD/data/rebot_real/${RUN_ID}_servo_safe_100hz_optimized/A_run01"
+mkdir -p "$RUN_DIR"
+```
+
+使用只读 diagnostic 连续观察；该脚本明确不发送 enable/disable/MoveJ/Servo：
+
+```bash
+python3 scripts/diagnose_rebot_feedback.py \
+  --sdk-root "$SDK_ROOT" \
+  --host "$ORIN_IP" \
+  --tcp-port "$TCP_PORT" \
+  --udp-port "$UDP_PORT" \
+  --duration 5 \
+  --period 0.1 \
+  | tee "$RUN_DIR/fault_check_before_motion.txt"
+```
+
+如果诊断输出仍为唯一活动故障 `500115`，并且末尾只读故障详情同时满足：
+
+```text
+name = SERVO_COMMAND_JERK_EXCEEDED
+source = servo_target_validator
+latched = true
+six-axis feedback_valid = true
+max(feedback_age_ms) <= 250
+robot_mode in {fault, disabled}
+```
+
+在机械臂物理状态确认安全、无人扶持风险已处理后，执行一次专用复位：
+
+```bash
+python3 scripts/reset_rebot_servo_jerk_fault.py \
+  --sdk-root "$SDK_ROOT" \
+  --host "$ORIN_IP" \
+  --tcp-port "$TCP_PORT" \
+  --udp-port "$UDP_PORT" \
+  --confirm RESET-500115 \
+  | tee "$RUN_DIR/reset_500115.txt"
+```
+
+脚本 PASS 末尾必须是：
+
+```text
+RESULT: 500115 cleared; robot remains disabled
+```
+
+随后重新运行上面的 5 s read-only diagnostic。最终 PASS 条件不是“某一帧看起来正常”，而是
+观察期内所有新状态都满足：
+
+```text
+primary_fault=0
+active_faults=()
+six-axis feedback_valid=true
+没有新的 fault / protective stop / emergency stop
+机械臂处于预期的 disabled/安全非运动状态
+```
+
+如果专用复位被拒绝、500115 立即重新出现，或出现其他 fault，停在这里；保存 diagnostic、
+`reset_500115.txt` 和 Lower 日志，继续查根因。不要放宽 runner gate，也不要反复 reset。
+
+#### Step 5：复制 pending 到新运行目录，最后才显式授权
+
+**禁止修改**：
+
+```text
+config/rebot_excitation_actual_time_pending.yaml
+data/rebot_real/<历史日期>/<历史 run>/hardware*.yaml
+```
+
+先保存 pending 快照，再创建本次唯一可修改的 `hardware.yaml`：
+
+```bash
+cp config/rebot_excitation_actual_time_pending.yaml \
+  "$RUN_DIR/hardware.pending.yaml"
+
+cp "$RUN_DIR/hardware.pending.yaml" \
+  "$RUN_DIR/hardware.yaml"
+```
+
+pending 模板故意包含：
+
+```yaml
+allow_hardware: false
+allow_motion: false
+joint_mapping_verified: false
+j1_convention: UNRESOLVED
+```
+
+因此**只把两个 allow 改成 true 仍然不够，也不应该绕过 mapping gate**。本次若仍使用
+2026-09-07 的视觉 J1 约定，只能按 `excitation_smoke` 运行，不能冒充 identification-grade
+`excitation`。在新的 `hardware.yaml` 中逐项核对并显式填写：
+
+```text
+sdk_root / host / TCP / UDP
+output_csv = 本次 RUN_DIR/raw.csv
+control_mode = excitation
+control_rate_hz = 100
+duration_s = 30
+trajectory_replay_mode = actual_time_quintic_v1
+trajectory_hash = A_SHA
+trajectory_artifact = 当前正式 A/trajectory.csv
+trajectory_metadata = 当前正式 A/trajectory.meta.yaml
+trajectory_preview_acceptance = 当前正式 A/preview_acceptance.yaml
+
+joint_mapping_verified = true
+joint_mapping_scope = excitation_smoke
+j1_convention = PHYSICAL_MARK_PI_CENTERED_VISUAL_20260907
+joint_direction / joint_offset_rad = 当前已审核的现场映射
+position / velocity / acceleration / jerk / feedback-age gates = 当前已审核现场值
+```
+
+只有上述字段、Step 1/2 的 v2 acceptance、Step 3 全测试、Step 4 fault check 和现场物理安全
+都已经人工核对后，**最后一步**才在这个新文件中设置：
+
+```yaml
+allow_hardware: true
+allow_motion: true
+```
+
+授权后至少运行：
+
+```bash
+grep -nE \
+  "control_mode|control_rate_hz|duration_s|allow_hardware|allow_motion|joint_mapping_verified|joint_mapping_scope|j1_convention|trajectory_replay_mode|trajectory_hash|maximum_feedback_age_ms|maximum_disabled_feedback_age_ms" \
+  "$RUN_DIR/hardware.yaml"
+
+sha256sum \
+  "$RUN_DIR/hardware.pending.yaml" \
+  "$RUN_DIR/hardware.yaml" \
+  "$A_DIR/trajectory.csv" \
+  "$A_DIR/trajectory.meta.yaml" \
+  "$A_DIR/preview_report.yaml" \
+  "$A_DIR/preview.mp4" \
+  "$A_DIR/preview_acceptance.yaml" \
+  | tee "$RUN_DIR/pre_run.sha256"
+```
+
+如果要复用旧 run 中已经审核过的 mapping/limit 数值，只能把这些数值**人工复制到本次新文件**
+并再次核对；不要直接把某个历史 `hardware.yaml` 改名后继续使用，因为旧文件可能绑定旧 replay
+strategy、旧 acceptance 或旧 feedback gate。
+
+#### Step 6：执行真实 A，并核查 30 s、runtime envelope、dispatch 和命令数
+
+现场必须满足 §1 的机械固定、工作区、急停/断电和值守要求。执行命令：
+
+```bash
+python3 scripts/run_rebot_hardware.py \
+  --config "$RUN_DIR/hardware.yaml" \
+  --sdk-root "$SDK_ROOT" \
+  --host "$ORIN_IP" \
+  --tcp-port "$TCP_PORT" \
+  --udp-port "$UDP_PORT" \
+  --output "$RUN_DIR/raw.csv"
+```
+
+正常返回后，`raw.csv` 和 `raw.meta.yaml` 都必须存在。使用下面检查器做第一轮硬门禁：
+
+```bash
+python3 - "$RUN_DIR/raw.csv" "$RUN_DIR/raw.meta.yaml" <<'PY'
+from pathlib import Path
+import csv, math, sys, yaml
+
+csv_path = Path(sys.argv[1])
+meta_path = Path(sys.argv[2])
+meta = yaml.safe_load(meta_path.read_text())
+
+rows = list(csv.DictReader(csv_path.open(newline="", encoding="utf-8")))
+cmd_rows = [
+    row for row in rows
+    if row["control_mode"] == "excitation" and row["command_valid"] == "1"
+]
+
+assert meta["motion_status"] == "completed"
+assert meta["trajectory_replay_mode"] == "actual_time_quintic_v1"
+assert int(meta["observed_sample_count"]) == len(cmd_rows)
+assert len(cmd_rows) > 0
+
+envelope = meta["runtime_servo_envelope"]
+timing = meta["dispatch_timing"]
+
+assert envelope["strategy"] == "actual_time_quintic_v1"
+assert envelope["accepted_excitation_command_count"] == len(cmd_rows)
+assert math.isclose(float(envelope["trajectory_time_start_s"]), 0.0, abs_tol=1e-12)
+assert math.isclose(float(envelope["trajectory_time_end_s"]), 30.0, abs_tol=1e-9)
+assert math.isclose(float(envelope["trajectory_duration_s"]), 30.0, abs_tol=1e-9)
+
+assert timing["command_dispatch_timestamp_mismatch_count"] == 0
+assert timing["catch_up_burst_count"] == 0
+assert timing["nominal_rate_hz"] == 100.0
+assert timing["actual_dispatch_interval_min_ns"] >= timing["nominal_period_ns"]
+
+for joint, values in envelope["per_joint"].items():
+    assert values["delta_q_margin_rad"] >= -1e-12, (joint, "delta_q")
+    assert values["qd_margin_rad_s"] >= -1e-12, (joint, "qd")
+    assert values["qdd_margin_rad_s2"] >= -1e-9, (joint, "qdd")
+    assert values["jerk_margin_rad_s3"] >= -1e-9, (joint, "jerk")
+
+fault_rows = [row for row in cmd_rows if int(row["primary_fault_code"]) != 0]
+assert not fault_rows, f"active fault found in {len(fault_rows)} excitation rows"
+
+last_t = float(cmd_rows[-1]["trajectory_time_s"])
+assert math.isclose(last_t, 30.0, abs_tol=1e-9), last_t
+
+print("STEP6 PASS")
+print("motion_status =", meta["motion_status"])
+print("actual_excitation_command_count =", len(cmd_rows))
+print("trajectory_time_end_s =", envelope["trajectory_time_end_s"])
+print("effective_command_rate_hz =", timing["effective_command_rate_hz"])
+print("dispatch_interval_ns min/mean/p95/max =",
+      timing["actual_dispatch_interval_min_ns"],
+      timing["actual_dispatch_interval_mean_ns"],
+      timing["actual_dispatch_interval_p95_ns"],
+      timing["actual_dispatch_interval_max_ns"])
+print("tracking_quality =", meta.get("tracking_quality", {}).get("status"))
+print("identification_data_quality =", meta.get("identification_data_quality"))
+PY
+```
+
+这里必须理解 **3001 与实际真机命令数不是同一个概念**：
+
+- `3001` 是 100 Hz nominal frozen artifact 在 `0..30 s` 的 knot 数；
+- nominal 100 Hz deterministic Mock 可以恰好命中 3001 个 knot；
+- `actual_time_quintic_v1` 真机按**真实 dispatch elapsed time**在同一条批准的连续五次路径上重采样；
+- 如果同步 SDK ACK 带来 `10/13 ms` 等抖动，30 s 内的实际 Servo command 数可以少于 3001；
+- 真机 PASS 要求的是：覆盖到精确 `trajectory_time_s=30 s`、`motion_status=completed`、
+  runtime envelope 全部有非负 margin、没有 catch-up burst、timestamp mismatch 或 active fault，
+  并且 metadata 中的 accepted command count 与 raw CSV 实际 command rows 一致。
+
+`tracking_quality=warning` 本身仍只是 identification/control-quality warning，不等于硬件失败；
+但 `identification_data_quality.accepted` 默认仍为 false，完整跑完 30 s **不等于**这批数据已经
+获得系统辨识数据验收。后续仍需按 R8/R9 做 feedback cadence、滤波、重采样、qdd 和
+`effort_reported` 数据质量处理。
 
 ### 8.3 第一次真实运动：`joint_jog` 作为 R4 commissioning
 
@@ -1356,7 +1861,7 @@ B_run01/
 
 ## 17.2 raw CSV 的权威含义
 
-当前 `rebot_hardware_experiment_v2` 原始数据包含：
+当前 `rebot_hardware_experiment_v3` 原始数据包含（预处理仍兼容 v1/v2）：
 
 ```text
 timestamp_host_rx_ns
@@ -1366,6 +1871,9 @@ actual_dispatch_timestamp_ns
 actual_dispatch_interval_ns
 reference_dispatch_skew_ns
 state_snapshot_age_ms
+trajectory_time_s
+trajectory_interval_index
+trajectory_interval_ratio
 servo_sequence
 q0..q5
 qd0..qd5

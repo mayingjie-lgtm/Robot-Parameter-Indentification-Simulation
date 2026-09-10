@@ -29,10 +29,10 @@ RebotHardwareRunner
   +---------+---------+
   |         |         |
 state_only servo_hold excitation
-                      (frozen replay artifact)
+                      (actual-time quintic replay)
             |
             v
-rebot_hardware_experiment_v2 CSV
+rebot_hardware_experiment_v3 CSV
             + metadata
 ```
 
@@ -214,8 +214,9 @@ The upper layer implements only fail-fast checks:
 - finite values;
 - explicit mapping gate;
 - configured position limits;
-- consecutive-target velocity-derived delta (`maximum_command_velocity_rad_s / control_rate_hz`);
-- consecutive-target lower ServoCore fixed delta (`maximum_servo_target_delta_rad`);
+- excitation candidate position and consecutive-target fixed delta (`maximum_servo_target_delta_rad`);
+- excitation packet `qd/qdd/jerk`, recursively finite-differenced from SDK-accepted targets using their real host timestamps;
+- ServoCore timestamp interval `[0.5 ms, 100 ms]` before dispatch;
 - target-to-measured tracking error (`maximum_tracking_error_rad`, never divided by rate): runtime gate for hold/jog, but monitor-only quality evidence during `excitation`;
 - feedback validity;
 - feedback age;
@@ -224,9 +225,11 @@ The upper layer implements only fail-fast checks:
 - Servo-active state check;
 - state/command communication timeout.
 
-It does not duplicate lower Servo ownership, watchdog, sequence/timestamp validation,
-position/velocity/acceleration limits, protective stop, or fault supervision. The lower SDK
-remains the authoritative safety layer.
+Candidates are committed to the upper derivative history only after the synchronous SDK
+call confirms acceptance. A local envelope violation is recorded and is never passed to
+`servo_joint`; Servo is exited and a controlled park is attempted only from fresh healthy
+state, otherwise the runner disables directly. The lower SDK remains the authoritative
+safety layer for ownership, watchdog, protocol and fault supervision.
 
 ## 7. TCP observation caveat
 
@@ -371,9 +374,10 @@ CSV downsampling, Python interpolation, or post-processing of frozen `q_ref`. It
 100 Hz maximum target steps are J1 `0.0017004399271`, J2 `0.0018011981750`, J3
 `0.0015910576092`, J4 `0.0013838798796`, J5 `0.0023868853864`, J6 `0.0009089373027` rad;
 all pass both the `0.0028 rad` design target and the unchanged `0.003125 rad` Lower gate.
-The exact-command Mock replay completed all 3001 samples at nominal 100 Hz with
-`catch_up_burst_count=0` and `command_dispatch_timestamp_mismatch_count=0`. Real A has not
-been executed; the matching preview acceptance remains `accepted_for_hardware: false`.
+Under `actual_time_quintic_v1`, nominal 100 Hz still evaluates all 3001 knots exactly.
+With ACK delay, the command count may change: targets are evaluated on the same approved
+C2 path at real dispatch elapsed time, with one exact endpoint command at 30 s. Real A has
+not been executed; a new v2 matching preview acceptance remains required.
 
 This is software/Mock capability only. Real Fourier excitation remains prohibited until
 real-hardware mapping/geometry, replay-rate/limit certification and human preview
@@ -384,7 +388,7 @@ acceptance are complete.
 Schema:
 
 ```text
-rebot_hardware_experiment_v2
+rebot_hardware_experiment_v3
 ```
 
 Columns:
@@ -399,6 +403,9 @@ actual_dispatch_timestamp_ns
 actual_dispatch_interval_ns
 reference_dispatch_skew_ns
 state_snapshot_age_ms
+trajectory_time_s
+trajectory_interval_index
+trajectory_interval_ratio
 servo_sequence
 
 q0..q5
@@ -420,8 +427,9 @@ command_valid
 control_mode
 ```
 
-For `state_only`, command timestamp/sequence are empty and `q_cmd` is `NaN`; zeros are not
-invented.
+For `state_only`, command/trajectory fields are empty and `q_cmd` is `NaN`; zeros are not
+invented. For excitation, `q_cmd` is the target actually accepted for dispatch, not the
+nearest frozen knot.
 
 The schema intentionally does not contain:
 

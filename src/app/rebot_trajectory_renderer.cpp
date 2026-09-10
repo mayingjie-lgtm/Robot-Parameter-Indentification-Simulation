@@ -45,11 +45,13 @@ struct RenderOptions {
 struct TrajectoryPoint {
   double time{0.0};
   std::array<double, kDof> position{};
+  std::array<double, kDof> velocity{};
+  std::array<double, kDof> acceleration{};
 };
 
 enum class TrajectorySchema {
   SimulationActual,
-  ReplayExactCommand,
+  ReplayActualTimeQuintic,
 };
 
 struct TrajectoryData {
@@ -208,7 +210,7 @@ double parseCsvValue(const std::vector<std::string> &row, std::size_t column,
   return value;
 }
 
-/** Load either legacy simulation actual-q CSV or frozen exact-command replay CSV. */
+/** Load either legacy simulation actual-q CSV or a frozen quintic replay CSV. */
 TrajectoryData loadTrajectory(const fs::path &path) {
   std::ifstream input(path);
   if (!input) {
@@ -230,14 +232,18 @@ TrajectoryData loadTrajectory(const fs::path &path) {
   TrajectoryData trajectory;
   const bool replay_schema = columns.find("time") != columns.end();
   if (replay_schema) {
-    trajectory.schema = TrajectorySchema::ReplayExactCommand;
+    trajectory.schema = TrajectorySchema::ReplayActualTimeQuintic;
     const std::size_t time_column = requiredColumn(columns, "time");
     std::array<std::size_t, kDof> q_ref_columns{};
+    std::array<std::size_t, kDof> qd_ref_columns{};
+    std::array<std::size_t, kDof> qdd_ref_columns{};
     for (std::size_t joint = 0; joint < kDof; ++joint) {
       q_ref_columns[joint] =
           requiredColumn(columns, "q_ref" + std::to_string(joint));
-      requiredColumn(columns, "qd_ref" + std::to_string(joint));
-      requiredColumn(columns, "qdd_ref" + std::to_string(joint));
+      qd_ref_columns[joint] =
+          requiredColumn(columns, "qd_ref" + std::to_string(joint));
+      qdd_ref_columns[joint] =
+          requiredColumn(columns, "qdd_ref" + std::to_string(joint));
     }
 
     std::size_t line_number = 1;
@@ -252,6 +258,10 @@ TrajectoryData loadTrajectory(const fs::path &path) {
       for (std::size_t joint = 0; joint < kDof; ++joint) {
         point.position[joint] =
             parseCsvValue(row, q_ref_columns[joint], line_number);
+        point.velocity[joint] =
+            parseCsvValue(row, qd_ref_columns[joint], line_number);
+        point.acceleration[joint] =
+            parseCsvValue(row, qdd_ref_columns[joint], line_number);
       }
       if (!trajectory.points.empty() &&
           point.time <= trajectory.points.back().time) {
@@ -344,13 +354,34 @@ std::array<double, kDof> positionAt(const TrajectoryData &trajectory,
                          return value < point.time;
                        });
   const auto lower = std::prev(upper);
-  if (trajectory.schema == TrajectorySchema::ReplayExactCommand) {
-    // Exact-command preview is zero-order hold on the actual sampled Servo
-    // commands. It never reconstructs/interpolates a second mathematical path.
-    return lower->position;
+  const double alpha = (time - lower->time) / (upper->time - lower->time);
+  if (trajectory.schema == TrajectorySchema::ReplayActualTimeQuintic) {
+    const double h = upper->time - lower->time;
+    std::array<double, kDof> result{};
+    for (std::size_t joint = 0; joint < kDof; ++joint) {
+      const double q0 = lower->position[joint];
+      const double q1 = upper->position[joint];
+      const double v0 = lower->velocity[joint];
+      const double v1 = upper->velocity[joint];
+      const double a0 = lower->acceleration[joint];
+      const double a1 = upper->acceleration[joint];
+      const double delta = q1 - q0;
+      const double c0 = q0;
+      const double c1 = h * v0;
+      const double c2 = 0.5 * h * h * a0;
+      const double c3 = 10.0 * delta - h * (6.0 * v0 + 4.0 * v1) -
+                        h * h * (1.5 * a0 - 0.5 * a1);
+      const double c4 = -15.0 * delta + h * (8.0 * v0 + 7.0 * v1) +
+                        h * h * (1.5 * a0 - a1);
+      const double c5 = 6.0 * delta - 3.0 * h * (v0 + v1) -
+                        0.5 * h * h * (a0 - a1);
+      const double s = alpha;
+      result[joint] =
+          c0 + s * (c1 + s * (c2 + s * (c3 + s * (c4 + s * c5))));
+    }
+    return result;
   }
 
-  const double alpha = (time - lower->time) / (upper->time - lower->time);
   std::array<double, kDof> result{};
   for (std::size_t joint = 0; joint < kDof; ++joint) {
     result[joint] = lower->position[joint] +
@@ -641,8 +672,8 @@ void renderVideo(const RenderOptions &options,
             << "frames=" << frame_count << " fps=" << options.fps
             << " playback_speed=" << options.playback_speed << "\n"
             << "preview_mode="
-            << (trajectory.schema == TrajectorySchema::ReplayExactCommand
-                    ? "exact_command_zero_order_hold"
+            << (trajectory.schema == TrajectorySchema::ReplayActualTimeQuintic
+                    ? "actual_time_quintic_v1_continuous_path"
                     : "dynamic_simulation_actual_q")
             << std::endl;
 }

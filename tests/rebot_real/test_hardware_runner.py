@@ -4,6 +4,7 @@ import csv
 import inspect
 import math
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 import unittest
@@ -20,7 +21,9 @@ from rebot_real.control_adapter import RebotControlError
 from rebot_real.mock_client import MockArmClient
 from rebot_real.runner import RebotHardwareRunner, load_hardware_config
 from rebot_real.trajectory_artifact import (
+    TRAJECTORY_REPLAY_MODE,
     load_replay_artifact,
+    sha256_file,
     validate_preview_acceptance,
     validate_replay_runtime_limits,
 )
@@ -63,7 +66,7 @@ class RebotHardwareRunnerTest(unittest.TestCase):
         config["j1_convention"] = "CANONICAL_VERIFIED"
         return config
 
-    def _excitation_config(self, directory: str) -> dict:
+    def _excitation_config(self, directory: str, *, rate_hz: float = 100.0) -> dict:
         config = load_hardware_config(
             REPO_ROOT / "config" / "rebot_excitation_mock.yaml",
             repo_root=REPO_ROOT,
@@ -76,6 +79,50 @@ class RebotHardwareRunnerTest(unittest.TestCase):
         config["controlled_park_before_disable"] = True
         config["joint_position_min_rad"][0] = -math.pi
         config["joint_position_max_rad"][0] = math.pi
+        if rate_hz == 100.0:
+            source_root = REPO_ROOT / "results/rebot_real_ab_servo_safe_100hz_optimized/A"
+            config["trajectory_artifact"] = str(source_root / "trajectory.csv")
+            config["trajectory_metadata"] = str(source_root / "trajectory.meta.yaml")
+            config["trajectory_hash"] = None
+            config["control_rate_hz"] = 100.0
+        source_trajectory = Path(config["trajectory_artifact"])
+        source_metadata = Path(config["trajectory_metadata"])
+        trajectory = Path(directory) / "trajectory.csv"
+        metadata = Path(directory) / "trajectory.meta.yaml"
+        report = Path(directory) / "preview_report.yaml"
+        mp4 = Path(directory) / "preview.mp4"
+        acceptance = Path(directory) / "preview_acceptance.yaml"
+        shutil.copyfile(source_trajectory, trajectory)
+        artifact_metadata = yaml.safe_load(source_metadata.read_text())
+        sample_count = int(artifact_metadata["sample_count"])
+        artifact_metadata.update(
+            continuous_quintic_collision_precheck="PASS",
+            continuous_quintic_collision_subdivisions_per_interval=10,
+            continuous_quintic_collision_precheck_sample_count=(sample_count - 1) * 10 + 1,
+        )
+        metadata.write_text(yaml.safe_dump(artifact_metadata, sort_keys=False))
+        report.write_text(yaml.safe_dump({
+            "schema_version": "rebot_trajectory_preview_report_v2",
+            "trajectory_replay_mode": TRAJECTORY_REPLAY_MODE,
+            "trajectory_sha256": sha256_file(trajectory),
+            "continuous_quintic_collision_precheck": "PASS",
+            "preview_status": "PASS",
+        }, sort_keys=False))
+        mp4.write_bytes(b"mock actual-time preview")
+        acceptance.write_text(yaml.safe_dump({
+            "schema_version": "rebot_trajectory_preview_acceptance_v2",
+            "trajectory_replay_mode": TRAJECTORY_REPLAY_MODE,
+            "trajectory_sha256": sha256_file(trajectory),
+            "preview_report": str(report),
+            "preview_report_sha256": sha256_file(report),
+            "preview_mp4": str(mp4),
+            "preview_mp4_sha256": sha256_file(mp4),
+            "accepted_for_hardware": False,
+        }, sort_keys=False))
+        config["trajectory_replay_mode"] = TRAJECTORY_REPLAY_MODE
+        config["trajectory_artifact"] = str(trajectory)
+        config["trajectory_metadata"] = str(metadata)
+        config["trajectory_preview_acceptance"] = str(acceptance)
         return config
 
     def _runner(self, config: dict, fake: MockArmClient, *, mock_backend: bool = True) -> RebotHardwareRunner:
@@ -509,33 +556,31 @@ class RebotHardwareRunnerTest(unittest.TestCase):
             self.assertIn("servo_joint", fake.calls)
             self.assertEqual(fake.calls[-4:], ["exit_servo", "stop", "disable", "close"])
 
-    def test_historical_100hz_A_is_rejected_by_lower_servo_jump_gate_before_connect(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            config = load_hardware_config(
+    def test_historical_100hz_A_requires_new_replay_mode_at_config_load(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError, "trajectory_replay_mode=actual_time_quintic_v1"
+        ):
+            load_hardware_config(
                 REPO_ROOT / "results" / "rebot_real_ab" / "A" / "hardware.smoke.yaml",
                 repo_root=REPO_ROOT,
             )
-            config["output_csv"] = str(Path(directory) / "blocked.csv")
-            fake = MockArmClient()
-            with self.assertRaisesRegex(ValueError, "ServoCore fixed gate"):
-                self._runner(config, fake).run()
-            self.assertEqual(fake.calls, [])
 
-    def test_servo_safe_200hz_A_and_B_still_pass_offline_qualification(self) -> None:
+    def test_servo_safe_200hz_v1_acceptance_cannot_authorize_new_replay(self) -> None:
         for trajectory_name in ("A", "B"):
             with self.subTest(trajectory_name=trajectory_name):
                 root = REPO_ROOT / "results" / "rebot_real_ab_servo_safe_200hz" / trajectory_name
-                config = load_hardware_config(root / "hardware.pending.yaml", repo_root=REPO_ROOT)
+                config = load_hardware_config(
+                    root / "hardware.pending.yaml",
+                    repo_root=REPO_ROOT,
+                    overrides={"trajectory_replay_mode": TRAJECTORY_REPLAY_MODE},
+                )
                 artifact = load_replay_artifact(
                     config["trajectory_artifact"], config["trajectory_metadata"]
                 )
-                result = validate_replay_runtime_limits(artifact, config)
-                acceptance = validate_preview_acceptance(
-                    config["trajectory_preview_acceptance"], artifact, repo_root=REPO_ROOT
-                )
-                self.assertEqual(result["sample_count"], 6001)
-                self.assertEqual(result["sample_rate_hz"], 200.0)
-                self.assertTrue(acceptance["accepted_for_hardware"])
+                with self.assertRaisesRegex(ValueError, "acceptance v2 is required"):
+                    validate_preview_acceptance(
+                        config["trajectory_preview_acceptance"], artifact, repo_root=REPO_ROOT
+                    )
 
     def test_excitation_normal_completion_parks_without_polluting_raw_commands(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -546,29 +591,39 @@ class RebotHardwareRunnerTest(unittest.TestCase):
                 follow_servo_targets=True,
             )
             metadata = self._runner(config, fake).run()
-            self.assertEqual(metadata["observed_sample_count"], 6001)
+            self.assertEqual(metadata["observed_sample_count"], 3001)
             self.assertEqual(len(fake.movej_targets), 2)
             self.assertEqual(metadata["shutdown"]["strategy"], "controlled_park")
             self.assertEqual(metadata["shutdown"]["park_status"], "completed")
             self.assertEqual(metadata["shutdown"]["park_movej_command_count"], 1)
             with Path(config["output_csv"]).open("r", encoding="utf-8", newline="") as stream:
                 rows = list(csv.DictReader(stream))
-            self.assertEqual(len(rows), 6001)
+            self.assertEqual(len(rows), 3001)
             self.assertTrue(all(row["control_mode"] == "excitation" for row in rows))
             self.assertTrue(all(row["command_valid"] == "1" for row in rows))
             reference_timestamps = [int(row["timestamp_host_command_ns"]) for row in rows]
             self.assertTrue(
                 all(
-                    current - previous == 5_000_000
+                    current - previous == 10_000_000
                     for previous, current in zip(
                         reference_timestamps, reference_timestamps[1:]
                     )
                 )
             )
             self.assertTrue(
-                all(int(row["actual_dispatch_interval_ns"]) >= 5_000_000 for row in rows)
+                all(int(row["actual_dispatch_interval_ns"]) >= 10_000_000 for row in rows)
             )
             self.assertEqual(metadata["dispatch_timing"]["catch_up_burst_count"], 0)
+            envelope = metadata["runtime_servo_envelope"]
+            self.assertEqual(envelope["strategy"], TRAJECTORY_REPLAY_MODE)
+            self.assertEqual(envelope["accepted_excitation_command_count"], 3001)
+            self.assertEqual(envelope["trajectory_time_start_s"], 0.0)
+            self.assertEqual(envelope["trajectory_time_end_s"], 30.0)
+            for joint in envelope["per_joint"].values():
+                self.assertGreaterEqual(joint["delta_q_margin_rad"], 0.0)
+                self.assertGreaterEqual(joint["qd_margin_rad_s"], 0.0)
+                self.assertGreaterEqual(joint["qdd_margin_rad_s2"], 0.0)
+                self.assertGreaterEqual(joint["jerk_margin_rad_s3"], 0.0)
             artifact = load_replay_artifact(
                 config["trajectory_artifact"], config["trajectory_metadata"]
             )
@@ -581,12 +636,14 @@ class RebotHardwareRunnerTest(unittest.TestCase):
                 for sample in artifact.samples
             ]
             self.assertEqual(fake.servo_targets[1:], expected_sdk_targets)
+            self.assertEqual(float(rows[0]["trajectory_time_s"]), 0.0)
+            self.assertEqual(float(rows[-1]["trajectory_time_s"]), 30.0)
             final_q_cmd = [float(rows[-1][f"q_cmd{i}"]) for i in range(6)]
             self.assertNotEqual(final_q_cmd, metadata["shutdown"]["park_target_q"])
 
     def test_excitation_dispatches_at_5ms_while_state_updates_at_100ms(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            config = self._excitation_config(directory)
+            config = self._excitation_config(directory, rate_hz=200.0)
             config["maximum_tracking_error_rad"] = [1.0] * 6
             clock = FakeClock()
             fake = MockArmClient(
@@ -639,12 +696,16 @@ class RebotHardwareRunnerTest(unittest.TestCase):
             )
             failure = metadata["failure"]
             self.assertEqual(failure["stage"], "excitation_state_snapshot")
-            self.assertLessEqual(failure["artifact_time_s"], 0.025)
+            self.assertLessEqual(
+                failure["artifact_time_s"],
+                config["state_timeout_s"] + 1.5 / config["control_rate_hz"],
+            )
             self.assertGreater(failure["state_snapshot_age_ms"], 20.0)
             for key in (
                 "sample_index", "q_ref", "previous_q_ref", "measured_q",
                 "target_step_delta_q", "tracking_error_q",
-                "reference_timestamp_ns", "actual_dispatch_timestamp_ns",
+                "trajectory_time_s", "trajectory_interval_index",
+                "trajectory_interval_ratio", "actual_dispatch_timestamp_ns",
                 "servo_sequence", "feedback_age_ms", "primary_fault_code",
                 "servo_reject_counters",
             ):
@@ -682,7 +743,7 @@ class RebotHardwareRunnerTest(unittest.TestCase):
                 metadata = runner.run()
                 timing = metadata["dispatch_timing"]
                 self.assertGreaterEqual(
-                    timing["actual_dispatch_interval_min_ns"], 5_000_000
+                    timing["actual_dispatch_interval_min_ns"], 10_000_000
                 )
                 self.assertEqual(timing["interval_below_nominal_count"], 0)
                 self.assertEqual(timing["catch_up_burst_count"], 0)
@@ -715,7 +776,7 @@ class RebotHardwareRunnerTest(unittest.TestCase):
                 follow_servo_targets=True,
             )
             metadata = self._runner(config, fake).run()
-            self.assertEqual(metadata["observed_sample_count"], 6001)
+            self.assertEqual(metadata["observed_sample_count"], 3001)
             self.assertEqual(metadata["preposition"]["status"], "completed")
             self.assertEqual(metadata["shutdown"]["park_status"], "completed")
 
@@ -748,7 +809,7 @@ class RebotHardwareRunnerTest(unittest.TestCase):
                 follow_servo_targets=True,
             )
             metadata = self._runner(config, fake).run()
-            self.assertEqual(metadata["observed_sample_count"], 6001)
+            self.assertEqual(metadata["observed_sample_count"], 3001)
             self.assertEqual(metadata["preposition"]["status"], "completed")
             self.assertEqual(metadata["shutdown"]["park_status"], "completed")
             self.assertEqual(len(fake.movej_targets), 2)
@@ -786,33 +847,35 @@ class RebotHardwareRunnerTest(unittest.TestCase):
             self.assertEqual(metadata["shutdown"]["park_status"], "completed")
 
     def test_excitation_runtime_validation_error_stops_then_parks(self) -> None:
-        class FailingRuntimeRunner(RebotHardwareRunner):
-            def __init__(self, *args, **kwargs):
-                super().__init__(*args, **kwargs)
-                self._runtime_checks = 0
-
-            def _validate_excitation_dynamics(self, sample, previous, sample_rate_hz):
-                super()._validate_excitation_dynamics(sample, previous, sample_rate_hz)
-                self._runtime_checks += 1
-                if self._runtime_checks == 2:
-                    raise RebotControlError("local runtime validation failed")
-
         with tempfile.TemporaryDirectory() as directory:
+            clock = FakeClock()
+
+            class LongAckDelayMock(MockArmClient):
+                def servo_joint(self, *args, **kwargs):
+                    reply = super().servo_joint(*args, **kwargs)
+                    if len(self.servo_targets) == 2:
+                        clock.advance_ms(101.0)
+                    return reply
+
             config = self._excitation_config(directory)
-            fake = MockArmClient(
+            fake = LongAckDelayMock(
                 position_rad=[0.0, 0.0, 0.0, 0.0, 0.0, math.pi / 2],
                 follow_movej_targets=True,
                 follow_servo_targets=True,
+                monotonic_ns_fn=clock.monotonic_ns,
             )
-            runner = FailingRuntimeRunner(
+            runner = RebotHardwareRunner(
                 config,
                 repo_root=REPO_ROOT,
                 client_factory=lambda **_: fake,
                 mock_backend=True,
-                sleep_fn=lambda _: None,
+                sleep_fn=clock.sleep,
+                monotonic_fn=clock.monotonic,
+                monotonic_ns_fn=clock.monotonic_ns,
             )
-            with self.assertRaisesRegex(RebotControlError, "local runtime validation failed"):
+            with self.assertRaisesRegex(RebotControlError, "timestamp interval"):
                 runner.run()
+            self.assertEqual(len(fake.servo_targets), 2)
             self.assertIn("exit_servo", fake.calls)
             self.assertIn("stop", fake.calls)
             self.assertEqual(len(fake.movej_targets), 2)
@@ -820,6 +883,9 @@ class RebotHardwareRunnerTest(unittest.TestCase):
             metadata = yaml.safe_load(
                 Path(config["output_csv"]).with_suffix(".meta.yaml").read_text()
             )
+            self.assertEqual(metadata["failure"]["stage"], "excitation_runtime_envelope")
+            self.assertEqual(metadata["failure"]["violating_quantity"], "dt_max_s")
+            self.assertGreater(metadata["failure"]["predicted_dt_s"], 0.1)
             self.assertEqual(metadata["shutdown"]["park_status"], "completed")
 
     def test_excitation_tracking_lag_is_monitor_only_and_records_quality_summary(self) -> None:
@@ -925,6 +991,10 @@ class RebotHardwareRunnerTest(unittest.TestCase):
             self.assertEqual(failure["servo_rejected_targets"], 1)
             self.assertEqual(failure["servo_target_jump_rejects"], 1)
             self.assertEqual(failure["primary_fault_code"], 500115)
+            self.assertEqual(
+                metadata["runtime_servo_envelope"]["accepted_excitation_command_count"],
+                0,
+            )
             self.assertEqual(
                 failure["primary_fault_code_symbolic_mapping"],
                 "unresolved_in_available_sdk_checkout",

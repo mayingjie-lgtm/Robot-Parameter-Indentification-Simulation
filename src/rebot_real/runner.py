@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from dataclasses import dataclass
 from pathlib import Path
 import time
 from typing import Any, Callable, Sequence
@@ -13,10 +14,157 @@ from .control_adapter import RebotControlAdapter, RebotControlError
 from .hardware_recorder import HardwareExperimentRecorder
 from .joint_jog import jog_target_at, validate_joint_jog
 from .state_capture import CaptureSample, JOINT_COUNT
-from .trajectory_artifact import ReplayArtifact, ReplaySample, load_replay_artifact, validate_preview_acceptance, validate_replay_runtime_limits
+from .trajectory_artifact import (
+    TRAJECTORY_REPLAY_MODE,
+    ReplayArtifact,
+    ResampledReplayTarget,
+    load_replay_artifact,
+    resample_actual_time_quintic,
+    validate_preview_acceptance,
+    validate_replay_runtime_limits,
+)
 
 
 CONTROL_MODES = {"state_only", "servo_hold", "joint_jog", "excitation"}
+
+
+@dataclass(frozen=True)
+class ServoEnvelopePrediction:
+    timestamp_ns: int
+    dt_s: float
+    q: tuple[float, ...]
+    delta_q: tuple[float, ...]
+    qd: tuple[float, ...]
+    qdd: tuple[float, ...]
+    jerk: tuple[float, ...]
+
+
+class ServoEnvelopeViolation(RebotControlError):
+    """A candidate packet that must not be passed to ArmClient."""
+
+    def __init__(self, *, quantity: str, joint: int | None, value: float,
+                 limit: float, prediction: ServoEnvelopePrediction) -> None:
+        label = "timestamp interval" if joint is None else f"J{joint + 1} {quantity}"
+        super().__init__(
+            f"local Servo envelope {label}={value:.9g} violates limit {limit:.9g}"
+        )
+        self.quantity = quantity
+        self.joint = joint
+        self.value = float(value)
+        self.limit = float(limit)
+        self.prediction = prediction
+
+
+class ActualTimeServoEnvelopeTracker:
+    """Predict packet derivatives from accepted targets and real timestamps."""
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        self.lower = tuple(float(value) for value in config["joint_position_min_rad"])
+        self.upper = tuple(float(value) for value in config["joint_position_max_rad"])
+        self.velocity_limit = tuple(float(value) for value in config["maximum_command_velocity_rad_s"])
+        self.acceleration_limit = tuple(float(value) for value in config["maximum_command_acceleration_rad_s2"])
+        self.jerk_limit = tuple(float(value) for value in config["maximum_command_jerk_rad_s3"])
+        self.delta_limit = float(config["maximum_servo_target_delta_rad"])
+        self.minimum_dt_s = float(config["minimum_servo_timestamp_interval_s"])
+        self.maximum_dt_s = float(config["maximum_servo_timestamp_interval_s"])
+        self.previous_q: tuple[float, ...] | None = None
+        self.previous_qd = (0.0,) * JOINT_COUNT
+        self.previous_qdd = (0.0,) * JOINT_COUNT
+        self.previous_timestamp_ns: int | None = None
+        self.accepted_count = 0
+        self.max_abs_delta_q = [0.0] * JOINT_COUNT
+        self.max_abs_qd = [0.0] * JOINT_COUNT
+        self.max_abs_qdd = [0.0] * JOINT_COUNT
+        self.max_abs_jerk = [0.0] * JOINT_COUNT
+
+    def initialize(self, q: Sequence[float], timestamp_ns: int) -> None:
+        if self.previous_q is not None:
+            raise RuntimeError("Servo envelope tracker is already initialized")
+        self.previous_q = _six_finite(q, "accepted initial Servo target")
+        self.previous_timestamp_ns = int(timestamp_ns)
+        if self.previous_timestamp_ns <= 0:
+            raise ValueError("accepted initial Servo timestamp must be positive")
+
+    def predict(self, q: Sequence[float], timestamp_ns: int) -> ServoEnvelopePrediction:
+        if self.previous_q is None or self.previous_timestamp_ns is None:
+            raise RuntimeError("Servo envelope tracker must be initialized")
+        target = _six_finite(q, "candidate Servo target")
+        stamp = int(timestamp_ns)
+        dt_s = (stamp - self.previous_timestamp_ns) * 1e-9
+        delta = tuple(target[j] - self.previous_q[j] for j in range(JOINT_COUNT))
+        if dt_s > 0.0:
+            qd = tuple(value / dt_s for value in delta)
+            qdd = tuple((qd[j] - self.previous_qd[j]) / dt_s for j in range(JOINT_COUNT))
+            jerk = tuple((qdd[j] - self.previous_qdd[j]) / dt_s for j in range(JOINT_COUNT))
+        else:
+            qd = qdd = jerk = (math.inf,) * JOINT_COUNT
+        prediction = ServoEnvelopePrediction(stamp, dt_s, target, delta, qd, qdd, jerk)
+        if dt_s < self.minimum_dt_s - 1e-12:
+            raise ServoEnvelopeViolation(quantity="dt_min_s", joint=None, value=dt_s,
+                                         limit=self.minimum_dt_s, prediction=prediction)
+        if dt_s > self.maximum_dt_s + 1e-12:
+            raise ServoEnvelopeViolation(quantity="dt_max_s", joint=None, value=dt_s,
+                                         limit=self.maximum_dt_s, prediction=prediction)
+        for joint in range(JOINT_COUNT):
+            if target[joint] < self.lower[joint] or target[joint] > self.upper[joint]:
+                limit = self.lower[joint] if target[joint] < self.lower[joint] else self.upper[joint]
+                raise ServoEnvelopeViolation(quantity="position_rad", joint=joint,
+                                             value=target[joint], limit=limit,
+                                             prediction=prediction)
+            checks = (
+                ("delta_q_rad", abs(delta[joint]), self.delta_limit),
+                ("qd_rad_s", abs(qd[joint]), self.velocity_limit[joint]),
+                ("qdd_rad_s2", abs(qdd[joint]), self.acceleration_limit[joint]),
+                ("jerk_rad_s3", abs(jerk[joint]), self.jerk_limit[joint]),
+            )
+            for quantity, value, limit in checks:
+                if value > limit + (1e-9 if quantity == "jerk_rad_s3" else 1e-12):
+                    raise ServoEnvelopeViolation(quantity=quantity, joint=joint,
+                                                 value=value, limit=limit,
+                                                 prediction=prediction)
+        return prediction
+
+    def commit(self, prediction: ServoEnvelopePrediction) -> None:
+        if prediction.timestamp_ns == self.previous_timestamp_ns:
+            raise RuntimeError("cannot commit a duplicate Servo timestamp")
+        self.previous_q = prediction.q
+        self.previous_qd = prediction.qd
+        self.previous_qdd = prediction.qdd
+        self.previous_timestamp_ns = prediction.timestamp_ns
+        self.accepted_count += 1
+        for target, values in (
+            (self.max_abs_delta_q, prediction.delta_q),
+            (self.max_abs_qd, prediction.qd),
+            (self.max_abs_qdd, prediction.qdd),
+            (self.max_abs_jerk, prediction.jerk),
+        ):
+            for joint, value in enumerate(values):
+                target[joint] = max(target[joint], abs(value))
+
+    def summary(self) -> dict[str, Any]:
+        per_joint: dict[str, Any] = {}
+        for joint in range(JOINT_COUNT):
+            maxima = {
+                "delta_q_abs_max_rad": self.max_abs_delta_q[joint],
+                "qd_abs_max_rad_s": self.max_abs_qd[joint],
+                "qdd_abs_max_rad_s2": self.max_abs_qdd[joint],
+                "jerk_abs_max_rad_s3": self.max_abs_jerk[joint],
+            }
+            per_joint[f"J{joint + 1}"] = {
+                **maxima,
+                "delta_q_margin_rad": self.delta_limit - maxima["delta_q_abs_max_rad"],
+                "qd_margin_rad_s": self.velocity_limit[joint] - maxima["qd_abs_max_rad_s"],
+                "qdd_margin_rad_s2": self.acceleration_limit[joint] - maxima["qdd_abs_max_rad_s2"],
+                "jerk_margin_rad_s3": self.jerk_limit[joint] - maxima["jerk_abs_max_rad_s3"],
+            }
+        return {
+            "strategy": TRAJECTORY_REPLAY_MODE,
+            "derivative_semantics": "finite_difference_of_sdk_accepted_targets_using_real_host_timestamps",
+            "accepted_excitation_command_count": self.accepted_count,
+            "minimum_servo_timestamp_interval_s": self.minimum_dt_s,
+            "maximum_servo_timestamp_interval_s": self.maximum_dt_s,
+            "per_joint": per_joint,
+        }
 
 
 def load_hardware_config(
@@ -58,6 +206,9 @@ def load_hardware_config(
         # Lower ServoCore fixed one-packet target jump gate:
         # 0.5 rad/s * 5 ms * 1.25 = 0.003125 rad.
         "maximum_servo_target_delta_rad": 0.003125,
+        # ServoCore host timestamp acceptance interval (fault 500117).
+        "minimum_servo_timestamp_interval_s": 0.0005,
+        "maximum_servo_timestamp_interval_s": 0.1,
         # Snapshot of the external SDK's current high-level MoveJ runtime policy.
         # These bounds are only for preposition; excitation limits remain separate.
         "movej_max_velocity_rad_s": [
@@ -77,6 +228,7 @@ def load_hardware_config(
         "command_timeout_s": 3.0,
         "state_timeout_s": 0.25,
         "trajectory_source": "frozen_replay_artifact",
+        "trajectory_replay_mode": None,
         "trajectory_hash": None,
         "trajectory_artifact": "results/rebot_trajectory_preview/trajectory_preview.csv",
         "trajectory_metadata": "results/rebot_trajectory_preview/trajectory_preview.meta.yaml",
@@ -156,6 +308,19 @@ def load_hardware_config(
         config["maximum_servo_target_delta_rad"],
         "maximum_servo_target_delta_rad",
     )
+    config["minimum_servo_timestamp_interval_s"] = _positive(
+        config["minimum_servo_timestamp_interval_s"],
+        "minimum_servo_timestamp_interval_s",
+    )
+    config["maximum_servo_timestamp_interval_s"] = _positive(
+        config["maximum_servo_timestamp_interval_s"],
+        "maximum_servo_timestamp_interval_s",
+    )
+    if (
+        config["minimum_servo_timestamp_interval_s"]
+        >= config["maximum_servo_timestamp_interval_s"]
+    ):
+        raise ValueError("minimum Servo timestamp interval must be below maximum")
     config["movej_timeout_s"] = _positive(config["movej_timeout_s"], "movej_timeout_s")
     config["start_position_tolerance_rad"] = _positive(
         config["start_position_tolerance_rad"],
@@ -180,6 +345,8 @@ def load_hardware_config(
         output = root / output
     config["output_csv"] = str(output)
     config["trajectory_source"] = str(config["trajectory_source"])
+    if config["trajectory_replay_mode"] is not None:
+        config["trajectory_replay_mode"] = str(config["trajectory_replay_mode"])
     for name in (
         "trajectory_artifact",
         "trajectory_metadata",
@@ -191,6 +358,13 @@ def load_hardware_config(
         config[name] = str(evidence_path)
     if config["control_mode"] == "joint_jog":
         validate_joint_jog(config)
+    if (
+        config["control_mode"] == "excitation"
+        and config["trajectory_replay_mode"] != TRAJECTORY_REPLAY_MODE
+    ):
+        raise ValueError(
+            f"excitation requires trajectory_replay_mode={TRAJECTORY_REPLAY_MODE}"
+        )
     return config
 
 
@@ -231,6 +405,10 @@ class RebotHardwareRunner:
                 raise ValueError(
                     "excitation requires trajectory_source=frozen_replay_artifact"
                 )
+            if self.config.get("trajectory_replay_mode") != TRAJECTORY_REPLAY_MODE:
+                raise ValueError(
+                    f"excitation requires trajectory_replay_mode={TRAJECTORY_REPLAY_MODE}"
+                )
             replay_artifact = load_replay_artifact(
                 self.config["trajectory_artifact"],
                 self.config["trajectory_metadata"],
@@ -246,6 +424,7 @@ class RebotHardwareRunner:
                 replay_artifact,
                 repo_root=self.repo_root,
                 require_hardware_acceptance=not self.mock_backend,
+                replay_mode=TRAJECTORY_REPLAY_MODE,
             )
             self.config["trajectory_hash"] = replay_artifact.sha256
             self.config["duration_s"] = replay_artifact.duration_s
@@ -534,7 +713,7 @@ class RebotHardwareRunner:
         session: dict[str, bool],
         artifact: ReplayArtifact,
     ) -> None:
-        """Replay every frozen q_ref sample exactly once; never interpolate or resample."""
+        """Follow the approved C2 path at real Servo dispatch timestamps."""
 
         initial = adapter.read_state()
         self._validate_state(
@@ -596,30 +775,25 @@ class RebotHardwareRunner:
         state, initial_hold_timestamp_ns, _ = self._enter_servo_with_initial_hold(
             adapter, session, artifact.q_start
         )
+        tracker = ActualTimeServoEnvelopeTracker(self.config)
+        tracker.initialize(artifact.q_start, initial_hold_timestamp_ns)
         period_s = 1.0 / float(self.config["control_rate_hz"])
         period_ns = int(round(period_s * 1e9))
         if period_ns <= 0:
             raise RebotControlError("invalid frozen Servo reference period")
 
-        # Exact replay means exact frozen q_ref order with no resampling and no
-        # catch-up bursts. The frozen grid remains a nominal timing reference for
-        # diagnostics, but the timestamp sent to Lower must describe the real host
-        # dispatch instant. If synchronous ACK handling makes one cycle late, the
-        # next target is delayed rather than compressed into a short-dt burst.
-        reference_timestamp_ns = int(initial_hold_timestamp_ns)
         previous_dispatch_timestamp_ns = int(initial_hold_timestamp_ns)
         next_deadline_ns = previous_dispatch_timestamp_ns + period_ns
-        previous_sample: ReplaySample | None = None
         previous_target = artifact.q_start
-        for sample_index, sample in enumerate(artifact.samples):
-            reference_timestamp_candidate_ns = reference_timestamp_ns + period_ns
+        trajectory_start_timestamp_ns: int | None = None
+        last_trajectory_time_s: float | None = None
+        command_index = 0
+        while True:
             attempted_sequence = adapter.next_servo_sequence
-            target_step_delta_q = [
-                sample.q_ref[index] - previous_target[index]
-                for index in range(JOINT_COUNT)
-            ]
             state: CaptureSample | None = None
             actual_dispatch_timestamp_ns: int | None = None
+            target: ResampledReplayTarget | None = None
+            prediction: ServoEnvelopePrediction | None = None
             stage = "excitation_dispatch_pacing"
             try:
                 deadline_ns = max(
@@ -641,62 +815,89 @@ class RebotHardwareRunner:
                     require_servo_active=True,
                     current_monotonic_ns=gate_timestamp_ns,
                 )
-
-                stage = "excitation_frozen_dynamics"
-                self._validate_excitation_dynamics(
-                    sample, previous_sample, artifact.sample_rate_hz
-                )
-                stage = "excitation_target_step"
-                self._validate_target_step(sample.q_ref, previous_target)
                 # During excitation, q_ref-q is identification/control-quality
                 # evidence only. It is recorded in q/q_cmd and summarized offline;
                 # unlike servo_hold/joint_jog it is not a runtime abort gate.
 
-                # Re-check the hard adjacent-dispatch floor after gate evaluation.
-                # This is normally a no-op, but makes the no-catch-up invariant
-                # explicit even with injected clocks or unusually fast validation.
-                self._pace_deadline_ns(previous_dispatch_timestamp_ns + period_ns)
                 actual_dispatch_timestamp_ns = self.monotonic_ns_fn()
+                if trajectory_start_timestamp_ns is None:
+                    trajectory_time_s = 0.0
+                else:
+                    trajectory_time_s = min(
+                        artifact.duration_s,
+                        (actual_dispatch_timestamp_ns - trajectory_start_timestamp_ns)
+                        * 1e-9,
+                    )
+                target = resample_actual_time_quintic(artifact, trajectory_time_s)
+                stage = "excitation_runtime_envelope"
+                prediction = tracker.predict(
+                    target.q_ref, actual_dispatch_timestamp_ns
+                )
                 actual_dispatch_interval_ns = (
                     actual_dispatch_timestamp_ns - previous_dispatch_timestamp_ns
                 )
-                reference_timestamp_ns = reference_timestamp_candidate_ns
                 stage = "excitation_servo_send"
                 timestamp_ns, sequence = adapter.send_servo_target(
-                    sample.q_ref,
+                    target.q_ref,
                     host_timestamp_ns=actual_dispatch_timestamp_ns,
                 )
+                # send_servo_target returns only after the SDK confirms acceptance.
+                tracker.commit(prediction)
             except RebotControlError as exc:
                 failure_observed_timestamp_ns = self.monotonic_ns_fn()
+                if target is None:
+                    failure_trajectory_time_s = (
+                        0.0
+                        if trajectory_start_timestamp_ns is None
+                        else min(
+                            artifact.duration_s,
+                            (failure_observed_timestamp_ns - trajectory_start_timestamp_ns)
+                            * 1e-9,
+                        )
+                    )
+                    target = resample_actual_time_quintic(
+                        artifact, failure_trajectory_time_s
+                    )
+                envelope = tracker.summary()
+                envelope["trajectory_time_start_s"] = (
+                    None if tracker.accepted_count == 0 else 0.0
+                )
+                envelope["trajectory_time_end_s"] = last_trajectory_time_s
+                envelope["trajectory_duration_s"] = artifact.duration_s
+                recorder.runtime_envelope_result = envelope
                 recorder.failure_result = self._excitation_failure_evidence(
                     stage=stage,
-                    sample_index=sample_index,
-                    sample=sample,
+                    sample_index=command_index,
+                    target=target,
                     previous_target=previous_target,
                     state=state,
-                    target_step_delta_q=target_step_delta_q,
-                    reference_timestamp_ns=reference_timestamp_candidate_ns,
                     actual_dispatch_timestamp_ns=actual_dispatch_timestamp_ns,
                     failure_observed_timestamp_ns=failure_observed_timestamp_ns,
                     servo_sequence=attempted_sequence,
                     error=exc,
+                    prediction=prediction,
                 )
                 recorder.failure_result.update(
                     self._best_effort_servo_reject_diagnostics(adapter)
                 )
                 if stage == "excitation_servo_send":
                     raise RebotControlError(
-                        f"excitation sample {sample_index} Servo send rejected: {exc}"
+                        f"excitation command {command_index} Servo send rejected: {exc}"
                     ) from exc
                 raise
+            assert state is not None and target is not None
+            if trajectory_start_timestamp_ns is None:
+                trajectory_start_timestamp_ns = actual_dispatch_timestamp_ns
             recorder.record(
                 state,
-                q_cmd=sample.q_ref,
+                q_cmd=target.q_ref,
                 timestamp_host_command_ns=timestamp_ns,
                 actual_dispatch_timestamp_ns=actual_dispatch_timestamp_ns,
                 actual_dispatch_interval_ns=actual_dispatch_interval_ns,
                 reference_dispatch_skew_ns=(
-                    actual_dispatch_timestamp_ns - reference_timestamp_ns
+                    actual_dispatch_timestamp_ns
+                    - trajectory_start_timestamp_ns
+                    - int(round(target.trajectory_time_s * 1e9))
                 ),
                 state_snapshot_age_ms=self._state_snapshot_age_ms(
                     state, actual_dispatch_timestamp_ns
@@ -704,11 +905,23 @@ class RebotHardwareRunner:
                 servo_sequence=sequence,
                 command_valid=True,
                 control_mode="excitation",
+                trajectory_time_s=target.trajectory_time_s,
+                trajectory_interval_index=target.interval_index,
+                trajectory_interval_ratio=target.interval_ratio,
             )
             previous_dispatch_timestamp_ns = actual_dispatch_timestamp_ns
-            previous_sample = sample
-            previous_target = sample.q_ref
+            previous_target = target.q_ref
+            last_trajectory_time_s = target.trajectory_time_s
             next_deadline_ns = deadline_ns + period_ns
+            command_index += 1
+            if target.trajectory_time_s >= artifact.duration_s:
+                break
+
+        envelope = tracker.summary()
+        envelope["trajectory_time_start_s"] = 0.0
+        envelope["trajectory_time_end_s"] = artifact.duration_s
+        envelope["trajectory_duration_s"] = artifact.duration_s
+        recorder.runtime_envelope_result = envelope
 
         adapter.exit_servo()
         session["servo"] = False
@@ -757,27 +970,29 @@ class RebotHardwareRunner:
         *,
         stage: str,
         sample_index: int,
-        sample: ReplaySample,
+        target: ResampledReplayTarget | None,
         previous_target: Sequence[float],
         state: CaptureSample | None,
-        target_step_delta_q: Sequence[float],
-        reference_timestamp_ns: int,
         actual_dispatch_timestamp_ns: int | None,
         failure_observed_timestamp_ns: int,
         servo_sequence: int,
         error: BaseException,
+        prediction: ServoEnvelopePrediction | None,
     ) -> dict[str, Any]:
         """Build the complete per-sample evidence required for any replay gate failure."""
 
         measured_q = None if state is None else list(state.q)
+        q_ref = None if target is None else list(target.q_ref)
         tracking_error_q = (
             None
-            if state is None
+            if state is None or target is None
             else [
-                sample.q_ref[index] - state.q[index]
+                target.q_ref[index] - state.q[index]
                 for index in range(JOINT_COUNT)
             ]
         )
+        violation = error if isinstance(error, ServoEnvelopeViolation) else None
+        predicted = violation.prediction if violation is not None else prediction
         counters = {
             "accepted_targets": 0 if state is None else state.servo_accepted_targets,
             "rejected_targets": 0 if state is None else state.servo_rejected_targets,
@@ -789,13 +1004,23 @@ class RebotHardwareRunner:
         return {
             "stage": stage,
             "sample_index": int(sample_index),
-            "artifact_time_s": float(sample.time),
-            "q_ref": list(sample.q_ref),
+            "trajectory_time_s": None if target is None else target.trajectory_time_s,
+            "artifact_time_s": None if target is None else target.trajectory_time_s,
+            "trajectory_interval_index": None if target is None else target.interval_index,
+            "trajectory_interval_ratio": None if target is None else target.interval_ratio,
+            "q_ref": q_ref,
             "previous_q_ref": list(previous_target),
             "measured_q": measured_q,
-            "target_step_delta_q": list(target_step_delta_q),
+            "target_step_delta_q": None if predicted is None else list(predicted.delta_q),
+            "predicted_qd": None if predicted is None else list(predicted.qd),
+            "predicted_qdd": None if predicted is None else list(predicted.qdd),
+            "predicted_jerk": None if predicted is None else list(predicted.jerk),
+            "predicted_dt_s": None if predicted is None else predicted.dt_s,
+            "violating_joint": None if violation is None or violation.joint is None else violation.joint + 1,
+            "violating_quantity": None if violation is None else violation.quantity,
+            "calculated_value": None if violation is None else violation.value,
+            "configured_limit": None if violation is None else violation.limit,
             "tracking_error_q": tracking_error_q,
-            "reference_timestamp_ns": int(reference_timestamp_ns),
             "actual_dispatch_timestamp_ns": (
                 None
                 if actual_dispatch_timestamp_ns is None
@@ -962,40 +1187,6 @@ class RebotHardwareRunner:
                     f"excitation start J{index + 1} differs from frozen artifact "
                     f"q_ref[0] by more than {tolerance} rad"
                 )
-
-    def _validate_excitation_dynamics(
-        self,
-        sample: ReplaySample,
-        previous: ReplaySample | None,
-        sample_rate_hz: float,
-    ) -> None:
-        for index in range(JOINT_COUNT):
-            if (
-                abs(sample.qd_ref[index])
-                > self.config["maximum_command_velocity_rad_s"][index] + 1e-12
-            ):
-                raise RebotControlError(
-                    f"excitation frozen J{index + 1} velocity limit exceeded"
-                )
-            if (
-                abs(sample.qdd_ref[index])
-                > self.config["maximum_command_acceleration_rad_s2"][index] + 1e-12
-            ):
-                raise RebotControlError(
-                    f"excitation frozen J{index + 1} acceleration limit exceeded"
-                )
-            if previous is not None:
-                jerk = abs(
-                    (sample.qdd_ref[index] - previous.qdd_ref[index])
-                    * sample_rate_hz
-                )
-                if (
-                    jerk
-                    > self.config["maximum_command_jerk_rad_s3"][index] + 1e-9
-                ):
-                    raise RebotControlError(
-                        f"excitation frozen J{index + 1} jerk limit exceeded"
-                    )
 
     def _validate_jog_envelope(self, origin: Sequence[float], jog: dict[str, Any]) -> None:
         for index, value in enumerate(origin):

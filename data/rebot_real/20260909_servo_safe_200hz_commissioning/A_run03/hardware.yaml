@@ -13,8 +13,8 @@ duration_s: 30.0
 max_samples: null
 output_csv: data/rebot_real/20260909_servo_safe_200hz_commissioning/A_run03/raw.csv
 
-allow_hardware: false
-allow_motion: false
+allow_hardware: true
+allow_motion: true
 joint_mapping_verified: true
 j1_convention: PHYSICAL_MARK_PI_CENTERED_VISUAL_20260907
 joint_mapping_scope: excitation_smoke

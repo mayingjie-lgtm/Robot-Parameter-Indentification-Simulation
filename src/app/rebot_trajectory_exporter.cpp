@@ -24,6 +24,7 @@ namespace fs = std::filesystem;
 namespace {
 
 constexpr std::size_t kDof = 6;
+constexpr std::size_t kQuinticCollisionSubdivisions = 10;
 
 struct Options {
   fs::path coefficients;
@@ -266,6 +267,63 @@ sampleTrajectory(const trajectory::FourierTrajectory &trajectory,
   return samples;
 }
 
+ReplayPoint quinticHermitePoint(const ReplayPoint &left,
+                                const ReplayPoint &right, double ratio) {
+  const double h = right.time - left.time;
+  if (!(h > 0.0) || ratio < 0.0 || ratio > 1.0) {
+    throw std::runtime_error("invalid quintic interpolation interval");
+  }
+  ReplayPoint result;
+  result.time = left.time + ratio * h;
+  result.q.resize(kDof);
+  result.qd.resize(kDof);
+  result.qdd.resize(kDof);
+  for (std::size_t joint = 0; joint < kDof; ++joint) {
+    const Eigen::Index j = static_cast<Eigen::Index>(joint);
+    const double q0 = left.q(j), q1 = right.q(j);
+    const double v0 = left.qd(j), v1 = right.qd(j);
+    const double a0 = left.qdd(j), a1 = right.qdd(j);
+    const double delta = q1 - q0;
+    const double c0 = q0;
+    const double c1 = h * v0;
+    const double c2 = 0.5 * h * h * a0;
+    const double c3 = 10.0 * delta - h * (6.0 * v0 + 4.0 * v1) -
+                      h * h * (1.5 * a0 - 0.5 * a1);
+    const double c4 = -15.0 * delta + h * (8.0 * v0 + 7.0 * v1) +
+                      h * h * (1.5 * a0 - a1);
+    const double c5 = 6.0 * delta - 3.0 * h * (v0 + v1) -
+                      0.5 * h * h * (a0 - a1);
+    const double s = ratio;
+    result.q(j) = c0 + s * (c1 + s * (c2 + s * (c3 + s * (c4 + s * c5))));
+    result.qd(j) =
+        (c1 + s * (2.0 * c2 + s * (3.0 * c3 +
+                                    s * (4.0 * c4 + s * 5.0 * c5)))) /
+        h;
+    result.qdd(j) =
+        (2.0 * c2 + s * (6.0 * c3 +
+                          s * (12.0 * c4 + s * 20.0 * c5))) /
+        (h * h);
+  }
+  return result;
+}
+
+std::vector<ReplayPoint>
+denseQuinticPath(const std::vector<ReplayPoint> &samples) {
+  std::vector<ReplayPoint> dense;
+  dense.reserve((samples.size() - 1) * kQuinticCollisionSubdivisions + 1);
+  for (std::size_t interval = 0; interval + 1 < samples.size(); ++interval) {
+    for (std::size_t subdivision = 0;
+         subdivision < kQuinticCollisionSubdivisions; ++subdivision) {
+      dense.push_back(quinticHermitePoint(
+          samples[interval], samples[interval + 1],
+          static_cast<double>(subdivision) /
+              static_cast<double>(kQuinticCollisionSubdivisions)));
+    }
+  }
+  dense.push_back(samples.back());
+  return dense;
+}
+
 void runEverySampleModelPrecheck(
     const fs::path &model_path,
     const force_node::ForceControllerConfig &controller_config,
@@ -403,10 +461,12 @@ int main(int argc, char **argv) {
     }
     const auto samples =
         sampleTrajectory(trajectory, duration, options.sample_rate_hz);
+    const auto dense_quintic_samples = denseQuinticPath(samples);
 
     // Stronger replay-specific check: every frozen q_ref sample is applied to
     // the canonical collision model before any artifact is accepted.
-    runEverySampleModelPrecheck(options.model, controller_config, samples);
+    runEverySampleModelPrecheck(options.model, controller_config,
+                                dense_quintic_samples);
 
     {
       std::ofstream output(options.output);
@@ -490,6 +550,11 @@ int main(int argc, char **argv) {
       metadata << "collision_model_hash: " << sha256File(options.model) << "\n";
       metadata << "collision_precheck: PASS\n";
       metadata << "collision_precheck_sample_count: " << samples.size() << "\n";
+      metadata << "continuous_quintic_collision_precheck: PASS\n";
+      metadata << "continuous_quintic_collision_subdivisions_per_interval: "
+               << kQuinticCollisionSubdivisions << "\n";
+      metadata << "continuous_quintic_collision_precheck_sample_count: "
+               << dense_quintic_samples.size() << "\n";
       metadata << "sample_rate_status: "
                   "candidate_replay_rate_not_hardware_certified\n";
     }
@@ -500,7 +565,8 @@ int main(int argc, char **argv) {
               << "metadata=" << options.metadata << "\n"
               << "trajectory_sha256=" << trajectory_sha << "\n"
               << "source_controller_precheck=PASS\n"
-              << "collision_precheck=PASS samples=" << samples.size() << "\n"
+              << "continuous_quintic_collision_precheck=PASS samples="
+              << dense_quintic_samples.size() << "\n"
               << "sample_count=" << samples.size()
               << " sample_rate_hz=" << options.sample_rate_hz
               << " duration_s=" << duration << std::endl;
