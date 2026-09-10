@@ -1,0 +1,78 @@
+schema_version: rebot_real_ab_v1
+
+experiment:
+  name: rebot_real_ab
+  output_root: data/rebot_real
+  control_rate_hz: 100.0
+
+connection:
+  sdk_root: /home/j/j_ws/src/wlsea_rebot_b601_upper_20260904
+  host: 192.168.50.24
+  tcp_port: 5000
+  udp_port: 5001
+  connect_timeout_s: 3.0
+  command_timeout_s: 3.0
+  state_timeout_s: 0.25
+
+authorization:
+  allow_hardware: true
+  allow_motion: true
+
+mapping:
+  joint_mapping_verified: true
+  joint_mapping_scope: excitation_smoke
+  j1_convention: PHYSICAL_MARK_PI_CENTERED_VISUAL_20260907
+  joint_direction: [1, 1, 1, 1, 1, 1]
+  joint_offset_rad: [-3.141592653589793, 0, 0, 0, 0, 0]
+
+safety:
+  joint_position_min_rad: [-3.14159265359, -3.174906585, -3.174906585, -1.904906585, -1.604906585, -3.174906585]
+  joint_position_max_rad: [3.14159265359, 0.087266463, 0.087266463, 1.604906585, 1.604906585, 3.174906585]
+  maximum_command_velocity_rad_s: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
+  maximum_command_acceleration_rad_s2: [0.698132, 0.558505, 0.698132, 0.837758, 0.837758, 1.047198]
+  maximum_command_jerk_rad_s3: [40, 40, 40, 40, 40, 40]
+  maximum_tracking_error_rad: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
+  maximum_servo_target_delta_rad: 0.003125
+  minimum_servo_timestamp_interval_s: 0.0005
+  maximum_servo_timestamp_interval_s: 0.1
+
+feedback:
+  motion_ready_feedback_max_age_ms: 100.0
+  maximum_disabled_feedback_age_ms: 110.0
+  lower_feedback_timeout_ms: 250.0
+  transient_feedback_invalid_recovery_ms: 100.0
+  host_state_snapshot_timeout_s: 0.25
+
+movej:
+  max_velocity_rad_s: [0.3141592653589793, 0.2792526803190927, 0.2617993877991494, 0.3141592653589793, 0.2617993877991494, 0.2617993877991494]
+  max_acceleration_rad_s2: [0.6979571678725324, 0.558330827712986, 0.6979571678725324, 0.8375835080320788, 0.8375835080320788, 1.0470230182713984]
+  max_jerk_rad_s3: [10.471975511965978, 10.471975511965978, 10.471975511965978, 10.471975511965978, 10.471975511965978, 10.471975511965978]
+  timeout_s: 60.0
+  controlled_park_before_disable: true
+  start_position_tolerance_rad: 0.01
+  settle_velocity_tolerance_rad_s: 0.01
+
+trajectories:
+  A:
+    artifact: results/rebot_real_ab_servo_safe_100hz_optimized/A/trajectory.csv
+    metadata: results/rebot_real_ab_servo_safe_100hz_optimized/A/trajectory.meta.yaml
+    preview_acceptance: results/rebot_real_ab_servo_safe_100hz_optimized/A/preview_acceptance.yaml
+  B:
+    artifact: results/rebot_real_ab_100hz_current/B/trajectory.csv
+    metadata: results/rebot_real_ab_100hz_current/B/trajectory.meta.yaml
+    preview_acceptance: results/rebot_real_ab_100hz_current/B/preview_acceptance.yaml
+
+identification:
+  model_file: rebot_dm/rebot_dm.urdf
+  identify_binary: build_rebot/identify
+  rank_relative_tolerance: 1.0e-6
+  friction_velocity_threshold: 0.01
+  enable_armature_columns: true
+  enable_damping_columns: true
+  enable_friction_columns: true
+  preprocessing:
+    cutoff_hz: 2.0
+    filter_order: 4
+    edge_trim_s: 0.5
+    maximum_resample_rate_hz: 100.0
+    gap_periods: 3.0

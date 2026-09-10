@@ -1,685 +1,234 @@
 # Robot Parameter Identification Simulation — Architecture
 
-> 目标：让项目首先服务于“机械臂系统辨识实验”，而不是为了通用性进行过度软件重构。
+> 目标：服务于可审计、可复现的机械臂动力学系统辨识。当前主对象是 reBot-DM；Panda/Piper 仿真链作为既有回归基线保留。
 >
-> 当前阶段原则：**先把现有 Panda/Piper 链路完全搞清楚并建立可重复 baseline，再以最小改动接入 reBot。**
->
-> 本文同时包含“当前代码事实”和“目标数据契约”。凡是两者不一致的地方，必须显式标注；如果本文与可重复运行的当前代码冲突，以 `AGENTS.md` 定义的 source-of-truth 顺序为准，先报告差异，不得把目标态当成已经实现。
+> 本文只记录当前长期架构，不记录开发阶段、Codex prompt 或阶段性 TODO。若本文与代码/运行证据冲突，以根目录 `AGENTS.md` 中的 source-of-truth 顺序为准。
 
-> 2026-08-24 状态：完整 Piper 固定夹爪的 Phase 3 闭环已经实现并通过门禁。本文中保留的 Phase 1 历史问题应结合 [`PHASE3_PIPER_BASELINE.md`](PHASE3_PIPER_BASELINE.md) 阅读；以下“当前实现”段落已按新数据契约更新。
+## 1. 系统目标
 
----
-
-# 1. 项目目标
-
-本项目最终要完成：
+系统辨识主线为：
 
 ```text
-机械臂模型
-   ↓
-设计激励轨迹
-   ↓
-仿真 / 真机执行
-   ↓
-采集 q, qd, qdd, tau
-   ↓
-构造动力学回归矩阵 W
-   ↓
-参数辨识
-   ↓
-独立轨迹验证
-   ↓
-辨识参数回灌模型
-   ↓
-验证动力学预测 / 重力补偿 / 控制效果
+机器人模型
+  -> 设计并冻结安全激励轨迹
+  -> 仿真或真机执行
+  -> 采集 q / qd / effort
+  -> 离线预处理与 qdd 估计
+  -> 构造动力学回归矩阵 W
+  -> A-only 基础空间与参数拟合
+  -> B-only 独立验证
+  -> 输出参数、预测、误差和 provenance
 ```
 
-当前阶段不追求“支持任意机器人”的完美框架。
+核心约束：数据物理语义、轨迹 provenance、A/B 独立性和真机安全优先于软件抽象。
 
-当前优先目标是：
+## 2. 仓库的两条主链路
 
-1. 完全理解现有代码；
-2. 建立可信的 Panda/Piper baseline；
-3. 搞清楚每一个数据字段的物理意义；
-4. 能解释系统辨识算法；
-5. 再接入 reBot；
-6. 只有出现真实重复和维护问题后，才做有针对性的重构。
-
----
-
-# 2. 当前系统主链路（代码事实）
+### 2.1 仿真辨识链路
 
 ```text
-┌─────────────────────┐
-│ experiment config   │
-└──────────┬──────────┘
-           ↓
-┌─────────────────────┐
-│ ForceController     │
-│ Fourier excitation  │
-└──────────┬──────────┘
-           ↓
-┌─────────────────────────────┐
-│ ExperimentBackend           │
-│                             │
-│  SimulationBackend          │
-│       ↓                     │
-│    MuJoCo                   │
-│                             │
-│  PiperHardwareBackend       │
-│       ↓                     │
-│    Piper SDK bridge         │
-└──────────┬──────────────────┘
-           ↓
-┌─────────────────────┐
-│ ExperimentRecorder  │
-│ CSV data            │
-└──────────┬──────────┘
-           ↓
-┌─────────────────────┐
-│ DataLoader          │
-└──────────┬──────────┘
-           ↓
-┌─────────────────────┐
-│ Regressor           │
-│ W(q,qd,qdd)         │
-└──────────┬──────────┘
-           ↓
-┌─────────────────────┐
-│ Identification      │
-│ OLS/WLS/IRLS/...    │
-└──────────┬──────────┘
-           ↓
-┌─────────────────────┐
-│ Validation          │
-│ tau_hat vs tau      │
-└─────────────────────┘
+config/*.yaml
+  -> run_experiment
+  -> ForceController / Fourier excitation
+  -> SimulationBackend
+  -> MuJoCo
+  -> ExperimentRecorder
+  -> simulation CSV + metadata
+  -> identify
+  -> result.yaml + prediction.csv
 ```
 
----
-
-# 3. 系统辨识的数学主线
-
-当前项目最核心的模型不是软件类，而是：
-
-\[
-\tau =
-M(q)\ddot q +
-C(q,\dot q)\dot q +
-g(q) +
-\tau_f
-\]
-
-刚体动力学对惯性参数可以写成线性形式：
-
-\[
-\tau = Y(q,\dot q,\ddot q)\beta
-\]
-
-多组采样堆叠：
-
-\[
-T = W\beta
-\]
-
-其中：
-
-- `q`：关节位置；
-- `qd`：关节速度；
-- `qdd`：关节加速度；
-- `tau`：用于辨识的关节力矩；
-- `Y`：单时刻动力学 regressor；
-- `W`：整段轨迹 observation matrix；
-- `beta`：待辨识动力学参数；
-- `beta_hat`：估计参数；
-- `tau_hat = W beta_hat`：模型预测力矩。
-
-对项目的任何代码修改，都必须能够回答：
-
-> 它改变了这条数学链路中的哪一部分？
-
-如果回答不了，一般不应该在当前阶段修改。
-
----
-
-# 4. 数据定义
-
-这一部分是整个项目最重要的接口协议。下面先区分**当前实现**和**目标数据契约**。
-
-## 4.0 当前统一实验链路的真实数据语义
-
-当前 `run_experiment -> ExperimentRecorder -> CSV` 在仿真 backend 下的实际行为是：
-
-| CSV / state 字段 | 当前来源 | 当前语义 |
-|---|---|---|
-| `q0..` / `qd0..` | MuJoCo pre-integration `qpos` / `qvel` | 区间起点状态 |
-| `qdd_mujoco0..` | 同一步 forward dynamics 的 MuJoCo `qacc` | 仿真辨识加速度真值 |
-| `qdd_diff0..` | `(qd_next-qd)/(time_end-time_begin)` | 前向速度差分，仅用于误差诊断 |
-| `tau_cmd0..` | `ControlCommand.torque` | 命令力矩 |
-| `tau_effort0..` | 同一步 MuJoCo `qfrc_actuator` | actuator 广义力；当前 unit gear 未饱和时等于命令 |
-| `tau_constraint0..` | MuJoCo `qfrc_constraint` | 接触、限位、equality 或 frictionloss 的约束力 |
-| `q_next0..` / `qd_next0..` | 积分后的 `qpos` / `qvel` | 区间终点状态 |
-| `saturated` / `contact_count` | controller / MuJoCo | 显式质量标记，不静默丢弃 |
-
-仿真 schema 使用 17 位有效数字并生成 `.meta.yaml`。真机 backend 仍保留 legacy `qdd/tau` schema，并在 metadata 中标记 `legacy_ambiguous_schema`；不能把真机 legacy 列解释成上述 MuJoCo 真值。
-
-## 4.1 q
+reBot-DM 仿真模型由 MuJoCo 与 Pinocchio 共同校验。augmented regressor 的 raw columns 固定为：
 
 ```text
-单位：rad
-含义：关节实际位置
+60 rigid-body
++ 6 armature
++ 6 viscous damping
++ 6 frictionloss
+= 78 raw columns
 ```
 
-仿真：
+冻结 synthetic clean baseline 在 `rank_relative_tolerance=1e-6` 下的 A-only base rank 为 52。该结果用于软件/数学闭环回归，不代表真实 reBot 物理参数。
+
+### 2.2 reBot 真机 A/B 链路
+
+面向操作者的唯一正式入口：
+
+```bash
+python3 scripts/run_rebot_real_ab.py --config config/rebot_real_ab.yaml
+```
+
+其内部只做编排，不复制底层控制或辨识算法：
 
 ```text
-MuJoCo qpos
+config/rebot_real_ab.yaml
+  -> strict config validation
+  -> offline preflight
+       - SDK/model/binary dependency check
+       - A/B frozen artifact + metadata hash check
+       - preview acceptance check
+       - runtime trajectory numerical limits check
+       - A/B independence check
+  -> create unique run directory
+  -> materialize A/hardware.yaml
+  -> operator ENTER gate A
+  -> RebotHardwareRunner
+       MoveJ(q0) -> settle -> Servo excitation -> controlled cleanup
+  -> validate A completion
+  -> materialize B/hardware.yaml
+  -> operator ENTER gate B
+  -> RebotHardwareRunner
+       MoveJ(q0) -> settle -> Servo excitation -> controlled cleanup
+  -> validate B completion
+  -> materialize identification config
+  -> run_rebot_identification.run_pipeline()
+       preprocessing(A) -> freeze A resample rate
+       preprocessing(B, frozen A rate)
+       A-only SVD/base-space + OLS
+       B-only reported-effort validation
+  -> summary.yaml
 ```
 
-真机：
+A 失败时 B 不得执行；B 失败时辨识不得执行。
+
+## 3. 统一配置职责
+
+`config/rebot_real_ab.yaml` 是正式 A/B 实验唯一长期人工维护配置。它包含：
+
+- SDK checkout、host、TCP/UDP port 和 timeout；
+- 真机 authorization；
+- joint mapping / J1 convention；
+- position/velocity/acceleration/jerk/Servo step limits；
+- feedback freshness/recovery 语义；
+- MoveJ 参数和 controlled park 策略；
+- A、B 各自 frozen artifact、metadata、preview acceptance；
+- offline identification 模型、binary 和 preprocessing/solver 参数。
+
+以下内容必须自动派生，不要求操作者手工填写：
+
+- `RUN_ID` / run directory；
+- A/B `output_csv`；
+- trajectory duration；
+- trajectory SHA-256；
+- 每次运行的底层 `hardware.yaml`；
+- identification 的 A/B raw 路径和 output directory；
+- provenance snapshot。
+
+## 4. 真机控制边界
+
+真实控制链由 `src/rebot_real/runner.py` 与 `control_adapter.py` 实现。正式编排脚本不得复制或改写以下语义：
+
+1. 真实 client 创建前完成 preflight 和 authorization gate；
+2. excitation 开始前用 SDK MoveJ 从当前姿态移动到 frozen artifact 的 `q0`；
+3. MoveJ 完成后要求新鲜反馈、位置误差和速度 settle；
+4. 进入 Servo 后立即发送初始 hold target；
+5. excitation 使用 `actual_time_quintic_v1`，按真实 host dispatch 时间重采样冻结连续轨迹；
+6. 不允许 catch-up burst；
+7. Servo accepted target 后才提交本地 finite-difference envelope history；
+8. hard fault、state stream 超时、Servo reject、ownership 丢失等进入 fail-safe；
+9. excitation 普通 `q_ref-q` tracking error 只作为 monitor-only 数据质量 warning，不单独触发立即失能；
+10. 正常结束或可恢复的软件侧 abort 使用明确的 controlled park 策略，最终 disable/close。
+
+外部 SDK 不属于本仓库，不得在本项目任务中静默修改。
+
+## 5. 真机数据语义
+
+真机 raw 数据由 `HardwareExperimentRecorder` 写出。关键字段：
+
+- `timestamp_host_rx_ns`：upper host 收到/发布 SDK state snapshot 的 monotonic 时间；
+- `timestamp_lower_ns`：SDK `JointState.monotonic_time_ns`，表示 lower 侧最新有效 driver feedback 的 steady-clock 时间，不是电机硬件 timestamp；
+- `timestamp_host_command_ns` / `actual_dispatch_timestamp_ns`：实际传入 `ArmClient.servo_joint()` 的 upper-host monotonic dispatch 时间；
+- `q`：SDK joint position，经 `joint_direction` / `joint_offset_rad` 映射后的 runner coordinate；
+- `qd`：SDK joint velocity，经 `joint_direction` 映射；
+- `effort_reported`：SDK `JointState.torque_nm` 的 joint-side reported effort estimate；
+- `q_cmd`：本次 Servo 的 runner-coordinate target position。
+
+当前没有：独立 hardware timestamp、raw motor encoder/current、`tau_cmd` 或独立力矩传感器真值。
+
+`effort_reported` 目前没有独立完成物理 torque calibration，因此系统辨识输出的正确表述是“对 SDK reported effort 的预测拟合”，不能仅凭低 RMSE 宣称逐项恢复了真实质量/惯量/摩擦参数。
+
+## 6. 命令频率与反馈频率必须分开
+
+当前 2026-09-10 成功实机证据显示：
+
+- A：2946 command rows，effective Servo dispatch 约 98.15 Hz；
+- B：2940 command rows，effective Servo dispatch 约 97.95 Hz；
+- 两次 lower/signal 独立更新约 10 Hz；
+- CSV/command 接近 100 Hz 不等价于 100 Hz 独立物理观测。
+
+因此 preprocessing、辨识解释和文档不得把 raw row cadence 当作传感器独立更新率。
+
+## 7. A-only / B-only 识别原则
+
+真实与 synthetic pipeline 都必须维持：
 
 ```text
-编码器 / 电机反馈的位置
+A:
+  choose/freeze preprocessing resample rate
+  build column scales
+  choose SVD rank/base directions
+  fit beta_hat
+
+B:
+  reuse A preprocessing decision where required
+  reuse A scales/base directions/beta_hat
+  only evaluate independent prediction
 ```
 
----
+B 可以报告自己的诊断统计，但不得反向修改 A 的 rank threshold、basis、参数或超参数。
 
-## 4.2 qd
+## 8. Mock 边界
+
+`--mock` 只用于验证 A/B orchestration、runner lifecycle、artifact provenance、输出目录和 failure dependency。
+
+`MockArmClient` 的 ideal following 不包含真实机械臂动力学和 identification-grade physical effort。因此：
+
+- Mock A/B motion completion 可以作为编排回归；
+- Mock raw 若不满足辨识运动观测条件，应被真实 identification pipeline 拒绝；
+- 此时可使用仓库已有 synthetic RNEA fixture 验证 preprocessing/identify 软件链；
+- 不得把 fixture 或 Mock 结果表述成真机参数辨识结果。
+
+## 9. 输出与 provenance
+
+正式一次 A/B run 的结构：
 
 ```text
-单位：rad/s
-含义：关节实际速度
+<RUN>/
+  experiment_config.snapshot.yaml
+  provenance.yaml
+  A/
+    hardware.yaml
+    raw.csv
+    raw.meta.yaml
+  B/
+    hardware.yaml
+    raw.csv
+    raw.meta.yaml
+  identification/
+    config.yaml
+    A.csv
+    B.csv
+    identify.yaml
+    identify.log
+    result.yaml
+    result.prediction.csv
+    training.png
+    validation.png
+  summary.yaml
 ```
 
-必须记录来源：
+`summary.yaml` 只做汇总，不替代 raw/meta/result provenance。任何数值结论都应能追溯到本次 run directory 和 frozen trajectory SHA-256。
 
-```text
-sim_exact
-motor_feedback
-position_differentiated
-filtered
-```
+## 10. 长期维护边界
 
-真机中不能默认电机 SDK 提供的 velocity 一定是精确 rad/s。
+长期 source documents 只保留：
 
----
+- `AGENTS.md`
+- `README.md`
+- `doc/ARCHITECTURE.md`
+- `doc/DEVELOPMENT_RULES.md`
+- `doc/REBOT_HARDWARE_CONTROL_CONTRACT.md`
+- `doc/REBOT_HARDWARE_DATA_CONTRACT.md`
+- `doc/REBOT_SYSTEM_IDENTIFICATION_GUIDE.md`
 
-## 4.3 qdd
-
-```text
-单位：rad/s^2
-含义：关节加速度
-```
-
-**当前实现：**仿真同时记录 `qdd_mujoco` 与 `qdd_diff`，正式仿真辨识显式选择前者；真机 legacy schema 仍使用速度差分。
-
-```text
-仿真：qdd_mujoco = MuJoCo qacc（pre-integration）
-
-真机：
-优先离线对 q / qd 做滤波和求导，并明确 preprocessing 方法
-```
-
-不要把未经滤波的差分结果当成可信真机 `qdd`，也不要因为 CSV 已有 `qdd` 列就声称它来自 physics engine。
-
----
-
-## 4.4 tau_cmd
-
-```text
-单位：Nm
-含义：发送给 backend / actuator 的命令力矩
-```
-
-注意：
-
-```text
-tau_cmd != 实际关节力矩
-```
-
-特别是在 MIT / PD / firmware control 模式下。
-
----
-
-## 4.5 tau_effort
-
-```text
-单位：Nm（如果 SDK 已校准）
-含义：backend 返回的 effort / estimated torque
-```
-
-必须确认：
-
-```text
-真实扭矩传感器？
-电流换算？
-firmware estimate？
-PD estimate？
-其他？
-```
-
-在没有确认之前，统一称为：
-
-```text
-reported effort
-```
-
-不能直接称为“真实关节力矩”。
-
----
-
-# 5. 模块职责
-
-## 5.1 ForceController
-
-负责：
-
-```text
-生成激励参考轨迹
-计算控制命令
-检查基本位置/碰撞/力矩安全约束
-```
-
-不负责：
-
-```text
-动力学参数辨识
-数据后处理
-真机 qdd 估计
-```
-
----
-
-## 5.2 ExperimentBackend
-
-当前负责：
-
-```text
-向执行环境发送命令
-读取机器人状态
-提供统一的 step / initialize 接口
-```
-
-当前 `ExperimentState` 包含：
-
-```text
-position
-velocity
-effort
-optional simulation_truth
-```
-
-`simulation_truth` 只由仿真 backend 填充，包含区间起点时间、pre-integration `q/qd/qacc/qfrc_actuator/qfrc_constraint` 和接触数；真实 Piper backend 的返回语义未改变。时间仍由 backend 的 `simulationTime()` / `timeStep()` 提供。
-
-目标上，如果后续为了保留真实数据来源而扩展接口，可以显式增加 `qdd`、timestamp 或 source metadata，但必须由实际需求驱动，不能为了形式统一提前扩展。
-
-Backend 可以是：
-
-```text
-MuJoCo
-Piper real
-reBot real（未来）
-```
-
-上层不应该关心具体通信方式。
-
----
-
-## 5.3 ExperimentRecorder
-
-目标职责：
-
-```text
-把状态和命令按明确物理语义写入文件
-```
-
-仿真 schema 已按 `qdd_mujoco/qdd_diff/tau_cmd/tau_effort/tau_constraint` 分列，并通过 sidecar metadata 记录来源。真机 legacy schema 仍需在进入真实参数辨识前单独完成传感器来源和预处理契约。
-
-Recorder 不应负责：
-
-```text
-复杂滤波
-动力学计算
-辨识
-机器人专用逻辑
-```
-
-原则：
-
-> Recorder 记录事实，不“猜测”数据；当同名字段可能有多个物理来源时，应在 schema 或实验 metadata 中显式记录 source。
-
----
-
-## 5.4 DataLoader / Preprocessing
-
-当前 `DataLoader` 按配置中的精确 header 前缀读取 position、velocity、acceleration 和 torque；缺列、重复列或不完整关节列组直接报错，不再按列数猜测来源。正式辨识只依据 finite、`saturated`、`contact_count` 和已知约束语义筛选数据，不再使用 `qdd < 10` 之类隐式阈值。
-
-目标职责：
-
-```text
-读取数据
-检查维度和时间戳
-读取/选择明确的 torque source
-根据 source metadata 决定 qd/qdd preprocessing
-```
-
-这一层是仿真数据和真机数据的重要分界。
-
----
-
-## 5.5 Regressor
-
-负责：
-
-```text
-给定 q, qd, qdd
-生成 Y / W
-```
-
-不负责：
-
-```text
-采集数据
-控制机械臂
-求解参数
-```
-
----
-
-## 5.6 Identification Algorithm
-
-负责：
-
-```text
-给定 W 和 tau
-求 beta_hat
-```
-
-例如：
-
-```text
-OLS
-WLS
-IRLS
-TLS
-EKF
-ML
-CLOE
-```
-
-算法层原则上不应该知道：
-
-```text
-Panda
-Piper
-reBot
-MuJoCo
-真实机械臂 SDK
-```
-
----
-
-## 5.7 Evaluation
-
-当前 Piper 正式模式要求不同路径的 trajectory A training CSV 与 trajectory B validation CSV，然后计算：
-
-```text
-tau_hat = W beta_hat
-```
-
-训练 A 定义固定的列缩放、SVD 数值秩和基础参数方向；所有噪声/IRLS 实验复用这组基础坐标，B 始终保持干净且不参与估计。
-
-目标重点指标：
-
-```text
-train RMSE
-validation RMSE
-per-joint RMSE
-max error
-W rank
-singular values
-condition number
-```
-
-最终评价重点应升级为：
-
-```text
-独立于辨识激励轨迹的 validation trajectory 上的 torque prediction
-```
-
-而不是：
-
-```text
-每一个原始惯性参数都精确恢复
-```
-
----
-
-# 6. Robot-specific 与 Robot-agnostic 边界
-
-## 可以 robot-specific
-
-```text
-robot model files
-URDF / MJCF
-joint limits
-home pose
-controller gains
-hardware SDK adapter
-specific hardware safety limits
-robot-specific validation config
-```
-
-## 应尽量 robot-agnostic
-
-```text
-ExperimentRecorder
-DataLoader
-Identification algorithms
-metrics
-diagnostics
-experiment pipeline
-result format
-```
-
-## 暂时允许 robot-specific
-
-```text
-regressor implementation
-inverse dynamics implementation
-```
-
-原因：
-
-当前 Panda/Piper 已有经过现有项目验证的 MuJoCo-specific 实现。
-
-不要为了“统一”立刻替换它们。
-
----
-
-# 7. reBot 的接入位置
-
-> 2026-08-25 Phase 4A 已完成：仓库已加入 `rebot_dm/` dynamics-only canonical URDF/MJCF、显式零 armature/damping/friction simulation truth、J1–J6 六个 direct torque actuator，以及最小 `ReBotPinocchioDynamics` wrapper。full URDF 先加载 8-DoF 模型，再把两个 gripper joint 固定在经源 mesh 验证无自碰撞的 `[0.05, 0.05] m`，得到 `nq=6,nv=6` reduced model。MuJoCo↔Pinocchio gravity、`M(q)`、inverse dynamics 与 rigid-body `Y*theta` 均达到约 `1e-15` 数值闭环，Phase 3 Piper gates 保持不变。详见 [`PHASE4_REBOT_DM_MODEL_BASELINE.md`](PHASE4_REBOT_DM_MODEL_BASELINE.md)。
->
-> 2026-08-25 Phase 4B 已完成最小 `rebot_dm -> ForceController(hold_position) -> SimulationBackend -> MuJoCo -> ExperimentRecorder` 代码接入，并用 accepted 完整 mesh 验证 6DOF actuator mapping、无饱和/无意外 contact、`tau_cmd == qfrc_actuator` 和 Phase 3 CSV/metadata semantics。后续 STL 已补齐，Phase 5A/5B/5C 的 regressor、激励质量与 clean identification gates 也已完成；详见对应 Phase 4B/5 baseline 文档。
-
-目标结构：
-
-```text
-                  ┌── Panda model
-                  ├── Piper model
-Robot model ──────┤
-                  └── reBot model
-                         │
-                         ↓
-              experiment pipeline
-                         │
-              ┌──────────┴──────────┐
-              ↓                     ↓
-          MuJoCo sim            real backend
-                                    │
-                                    ↓
-                              reBot SDK
-```
-
-动力学辨识侧：
-
-```text
-reBot URDF
-   ↓
-Pinocchio
-   ↓
-inverse dynamics / torque regressor
-   ↓
-Identification algorithms
-```
-
-2026-08-26 起，reBot 真机首先增加一个**独立 state-only raw capture 旁路**，而不是直接实现
-`reBot ExperimentBackend`：
-
-```text
-reBot SDK public UDP JointState
-        ↓
-UDP-only state subscriber
-        ↓
-rebot_hardware_state_v1 CSV + metadata
-        ↓
-offline acceptance analyzer
-```
-
-该 Phase 6A 旁路不进入 `ForceController`，不创建 TCP control session，也不发送任何
-motor-changing command；`qdd` 只允许在后续 preprocessing 中离线生成。正式字段、
-时间戳/力矩/丢包语义和 J1 unresolved mapping 见
-[`REBOT_HARDWARE_DATA_CONTRACT.md`](REBOT_HARDWARE_DATA_CONTRACT.md)。
-
-2026-08-27 进一步完成了独立的 **reBot hardware control offline integration**，仍然不把
-SDK 强塞进 C++ `ExperimentBackend`：
-
-```text
-config/rebot_real_experiment.yaml
-             ↓
-      RebotControlAdapter
-             ↓
-      external ArmClient
-        ┌────┴────┐
-        ↓         ↓
- Servo q_target  JointState
-        └────┬────┘
-             ↓
-      RebotHardwareRunner
-       ├── state_only
-       ├── servo_hold
-       └── excitation (trajectory source pending)
-             ↓
-rebot_hardware_experiment_v1 CSV + metadata
-```
-
-该控制路径的真实 Servo command 只有
-`servo_sequence + host_timestamp_ns + target_position_rad[6]`，不包含 `qd/kp/kd/tau_cmd`；
-因此 `tau_cmd_available=false`。上位机只做六轴/finite、mapping、位置限位、速度导出的
-单周期增量、feedback freshness/validity、primary fault 和 Servo 状态等 fail-fast gate，
-lower SDK 的 Servo watchdog、sequence/timestamp、位置/速度/加速度和 fault supervisor 仍是
-权威安全层。详细契约见
-[`REBOT_HARDWARE_CONTROL_CONTRACT.md`](REBOT_HARDWARE_CONTROL_CONTRACT.md)。
-
-Phase 6A raw UDP capture 语义保持不变。Phase 6B 的 `state_only` 会创建 SDK TCP session 以
-获得当前 SDK 的 state publication，因此只能保证**上位机不调用** `enable/enter_servo/
-servo_joint/MoveJ/configure_pvt/gripper`；不能声称 TCP observation session 完全无硬件副作用，
-因为 lower 在 TCP disconnect 时会执行 `disable()`。
-
-C++ `ExperimentBackend` integration 继续 **DEFERRED**：一方面其
-`desired_position/desired_velocity/kp/kd/torque` command contract 与 reBot position-only Servo
-不匹配，另一方面现有 non-simulation recorder 的 finite-difference `qdd` 与 command-torque
-legacy schema 也不适合 reBot 真机辨识。当前 joint mapping hardware verification 仍为
-`PENDING`，J1 convention 仍为 `UNRESOLVED`，所有真实 state/Servo/motion acceptance 均未完成。
-
-优先采用 Pinocchio，是为了避免继续手写第三套机器人动力学和 regressor。
-
----
-
-## reBot reported-effort 离线闭环（2026-09-08）
-
-已新增 `rebot_hardware_experiment_v1 -> Python preprocessing -> identify real_reported_effort -> A/B 报告`。
-保留 runner 坐标与 raw 数据；host receive 时间作为时轴，lower timestamp 仅用于重复反馈诊断。
-有效连续段重采样、零相位滤波后，从 SDK qd 求导生成 `qdd_est`，力矩目标为未标定的
-`effort_filtered`。A 定义全部缩放、SVD 和 OLS 参数；B 只用于独立评价。
-
-real 模式无需 MuJoCo quality columns 或 `theta_true`，附加回归列以布尔开关选择，
-不改回归器公式与原有 simulation 分支。Python 入口校验原始文件/轨迹独立性及映射一致性，
-记录模型、数据和处理设置 provenance。详见 README §6.1。
-
-这是 reported-effort prediction 首版，不是物理参数标定或实机运动放行。
-此前控制 runner 的授权范围、ACK 丢失清理和实际发送时序问题尚需另行处理。
-
----
-
-# 8. 当前明确不做的架构工作
-
-现阶段不做：
-
-```text
-通用插件系统
-复杂 factory hierarchy
-dependency injection framework
-ROS abstraction
-多层 service architecture
-统一所有 robot_core 源文件
-手写任意机器人 regressor generator
-```
-
-如果增加一个抽象层不能解决当前真实问题，就不增加。
-
----
-
-# 9. 架构演进原则
-
-项目采用：
-
-```text
-需求驱动抽象
-```
-
-而不是：
-
-```text
-预测未来需求后提前抽象
-```
-
-正确顺序：
-
-```text
-先 Panda/Piper baseline
-        ↓
-最小方式加入 reBot
-        ↓
-观察真实重复代码
-        ↓
-抽象重复部分
-        ↓
-继续 regression test
-```
-
----
-
-# 10. 当前阶段成功标准
-
-在开始 reBot 代码开发前，项目负责人应能够独立解释：
-
-1. `run_experiment` 从哪里开始；
-2. Fourier 激励如何产生；
-3. command torque 如何计算；
-4. MuJoCo 状态从哪里读取；
-5. CSV 每一列是什么；
-6. `qdd` 从哪里来；
-7. `tau` 从哪里来；
-8. `DataLoader` 如何组织数据；
-9. `W` 如何生成；
-10. `OLS` 在求什么；
-11. 为什么 `W` 可能 rank deficient；
-12. 为什么 full inertial parameter 不一定逐项可辨识；
-13. validation torque RMSE 表示什么；
-14. reBot 应该从项目哪两个位置接入：
-    - simulation/model
-    - real backend
-
-如果这 14 个问题仍有无法解释的部分，优先继续阅读/实验，而不是继续重构。
+开发阶段、阶段 baseline 和 Codex prompt 不应继续作为当前架构文档存在；历史细节由 Git history 保存。

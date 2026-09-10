@@ -1,8 +1,8 @@
 # reBot-DM Hardware Control Contract
 
-Date: 2026-08-27
-Scope: offline implementation of reBot-DM hardware control integration
-Status: software/Mock acceptance only; real hardware acceptance is pending
+Last updated: 2026-09-10
+Scope: reBot-DM real-hardware control integration and safety semantics
+Status: A/B excitation path validated on real hardware; physical identification acceptance remains a separate offline decision
 
 ## 1. Boundary
 
@@ -11,7 +11,13 @@ This path is intentionally separate from the existing C++ `ExperimentBackend` an
 Servo interface.
 
 ```text
-config/rebot_real_experiment.yaml
+config/rebot_real_ab.yaml
+            |
+            v
+scripts/run_rebot_real_ab.py
+            |
+            v
+RebotHardwareRunner
             |
             v
 RebotControlAdapter
@@ -25,28 +31,17 @@ Servo q_target   JointState
       |           |
       +-----+-----+
             v
-RebotHardwareRunner
-  +---------+---------+
-  |         |         |
-state_only servo_hold excitation
-                      (actual-time quintic replay)
-            |
-            v
 rebot_hardware_experiment_v3 CSV
             + metadata
 ```
 
-The Phase 6A raw state contract remains independent:
+The legacy UDP-only raw state recorder remains independent:
 
 ```text
 public UDP -> UdpStateSubscriber -> rebot_hardware_state_v1
 ```
 
-Phase 6B does not change that raw capture schema or its UDP-only semantics.
-
-2026-09-07 addition: `joint_jog` implements a bounded, single-joint quintic excursion
-and return through the same Servo adapter. It is software/Mock tested; hardware
-acceptance remains pending. It neither homes the arm nor unlocks `excitation`.
+The current formal A/B workflow does not modify that raw capture schema. `joint_jog` remains a bounded diagnostic mode and is not part of the normal A/B operator workflow.
 
 ## 2. Audited SDK source of truth
 
@@ -242,15 +237,13 @@ ArmController::handle_client_disconnect()
   -> disable(...)
 ```
 
-Accordingly Phase 6B `state_only` means:
+Accordingly the runner `state_only` mode means:
 
 ```text
 no upper enable / enter_servo / servo_joint / MoveJ / configure_pvt / gripper call
 ```
 
-It does **not** mean a TCP session is a completely side-effect-free hardware observation
-contract. The Phase 6A UDP-only recorder remains the preferred raw observation contract and
-is not replaced by this runner.
+It does **not** mean a TCP session is a completely side-effect-free hardware observation contract. The legacy UDP-only recorder remains the strictly observation-oriented raw path and is not replaced by this runner.
 
 ## 8. Control modes
 
@@ -268,7 +261,7 @@ connect
 
 No upper motor-changing command is reachable from `_run_state_only`.
 
-Real-hardware state acceptance remains `PENDING`.
+`state_only` remains available as a diagnostic mode. The formal A/B workflow uses the full excitation lifecycle and does not require a separate state-only run each time.
 
 ### `servo_hold`
 
@@ -301,22 +294,22 @@ exit_servo
 
 A failure in one cleanup action does not skip the remaining actions.
 
-Real Servo hold remains `PENDING` and is denied by the default configuration.
+`servo_hold` remains available as a diagnostic mode. Formal A/B excitation has already exercised Servo ownership on real hardware; the normal operator workflow no longer requires a separate hold run before every A/B experiment.
 
 ### `excitation`
 
 The trusted reBot Fourier source of truth remains the existing C++ `ForceController` /
 `trajectory::FourierTrajectory`; the Python hardware path does not copy that mathematics.
 `rebot_trajectory_exporter` freezes the accepted C++ trajectory into the
-`rebot_replay_trajectory_v1` CSV/metadata artifact, and the runner replays each stored
-`q_ref` sample exactly once.
+`rebot_replay_trajectory_v1` CSV/metadata artifact. The runner uses the approved
+`actual_time_quintic_v1` continuous path represented by the frozen q/qd/qdd knots and
+evaluates the target at actual Servo dispatch elapsed time; it does not regenerate Fourier coefficients online.
 
 Before any `RebotControlAdapter`, client factory, `ArmClient`, or connection is created,
 `excitation` validates the artifact SHA/schema/provenance, controller/collision precheck
 status, fixed sample grid, q/qd/qdd/jerk runtime limits, control-rate equality, and a
 matching-hash PASS preview report plus MP4 and `accepted_for_hardware: true` acceptance.
-The runner performs no interpolation, resampling, smoothing, Fourier evaluation, or
-automatic correction of `q_ref`.
+The runner performs no Fourier regeneration, smoothing, trajectory retuning, or automatic correction of the approved path. The only runtime interpolation is the audited piecewise quintic Hermite evaluation defined by `actual_time_quintic_v1`.
 
 After all artifact/preview gates have passed and a client is created, excitation uses this distinct preposition sequence:
 
@@ -335,7 +328,7 @@ fresh disabled feedback
   -> reuse adapter.latest_state without waiting for a new UDP frame
   -> gate snapshot age / feedback age / fault / Servo ownership
   -> record q_ref-q as tracking/data-quality evidence without aborting on ordinary lag
-  -> replay exactly the original frozen sample
+  -> evaluate the approved frozen continuous quintic path at actual dispatch elapsed time
 ```
 
 MoveJ is only a preposition operation. It is not appended to the frozen artifact, is not counted as an excitation command, and is not written as identification `command_valid=true` data. Metadata records a separate `preposition` block with start/target/final state and error/settle evidence. Blocking state waits remain limited to initial disabled validation, enable/Servo transitions, MoveJ settle, and cleanup/park settle; the Servo replay hot loop never calls `read_state()`.
@@ -376,13 +369,9 @@ CSV downsampling, Python interpolation, or post-processing of frozen `q_ref`. It
 `0.0015910576092`, J4 `0.0013838798796`, J5 `0.0023868853864`, J6 `0.0009089373027` rad;
 all pass both the `0.0028 rad` design target and the unchanged `0.003125 rad` Lower gate.
 Under `actual_time_quintic_v1`, nominal 100 Hz still evaluates all 3001 knots exactly.
-With ACK delay, the command count may change: targets are evaluated on the same approved
-C2 path at real dispatch elapsed time, with one exact endpoint command at 30 s. Real A has
-not been executed; a new v2 matching preview acceptance remains required.
+With ACK delay, the command count may change: targets are evaluated on the same approved C2 path at real dispatch elapsed time, with one exact endpoint command at 30 s.
 
-This is software/Mock capability only. Real Fourier excitation remains prohibited until
-real-hardware mapping/geometry, replay-rate/limit certification and human preview
-acceptance are complete.
+The optimized A was executed successfully on real hardware on 2026-09-10 with 2946 accepted excitation commands and no hard fault. The independently accepted B trajectory `73c0ad08360b0723ed13ba9e0e78d6cc924715bc567548fd5201c77a58457cc4` was also executed successfully with 2940 accepted excitation commands. Both runs completed MoveJ preposition and controlled park/disable/close. These execution results authorize the current control-path description; they do not by themselves prove physical torque calibration or identification parameter correctness.
 
 ## 9. Hardware experiment CSV
 
@@ -460,7 +449,7 @@ Every experiment writes `<csv>.meta.yaml` including:
 - explicit Servo command fields;
 - relevant `config/safety.json` snapshot when the configured SDK is present;
 - trajectory source/hash status;
-- pending real-hardware acceptance status.
+- explicit real-run motion, tracking-quality, feedback-cadence and cleanup status.
 
 Unavailable-signal flags are fixed to:
 
@@ -472,10 +461,7 @@ tau_cmd_available: false
 feedback_sequence_supported: false
 ```
 
-The Phase 6B `timestamp_host_rx_ns` source is the current SDK `StateStore` upper-host receive
-snapshot (`ActualJointState.received_monotonic_ns`), which is recorded when the decoded UDP
-state is published into the store. This is distinct from Phase 6A's timestamp sampled
-immediately after raw `recvfrom`.
+`timestamp_host_rx_ns` uses the current SDK `StateStore` upper-host receive snapshot (`ActualJointState.received_monotonic_ns`), recorded when the decoded UDP state is published into the store. This differs from the legacy UDP-only recorder, which samples host receive timing directly around raw `recvfrom`.
 
 ## 11. Offline smoke
 
@@ -499,9 +485,9 @@ j1_convention: UNRESOLVED
 
 so it cannot create a real `ArmClient` session or move a robot by accident.
 
-## 12. Real-machine values that must be filled/verified later
+## 12. Formal real-machine configuration
 
-Before any real motor-changing acceptance, verify or update at least:
+The following values are centralized in `config/rebot_real_ab.yaml` and must be reviewed whenever the robot/network/SDK/trajectory setup changes:
 
 ```text
 sdk_root
@@ -543,45 +529,26 @@ Lower freshness boundary 为 `lower_feedback_timeout_ms=250 ms`，并配合
 都必须 MoveJ park，primary fault、unsafe safety state、host state-stream loss、Servo reject 等
 仍走 fail-safe 路径并跳过自动 park。
 
-Recommended real acceptance order remains:
-
-```text
-state observation
-  -> hardware mapping/J1 confirmation
-  -> Servo hold
-  -> very small bounded motion
-  -> excitation only after trajectory-source integration and acceptance
-```
+For a new robot, remapped joints, changed SDK, or newly generated excitation, re-run the appropriate commissioning checks before formal A/B execution. For the currently configured robot and accepted A/B artifacts, normal operation is `--preflight-only` followed by the single formal A/B entry point.
 
 ## 13. Current status
 
 ```text
-simulation identification                 = PASS
-reBot state capture implementation        = PASS
-reBot hardware control adapter offline    = PASS
-reBot hardware runner offline             = PASS
-Mock Servo lifecycle                      = PASS
-Mock SDK MoveJ preposition                = PASS
-Mock frozen exact replay semantics        = PASS
-Mock 100 Hz no-catch-up timing             = PASS
-Mock tracking monitor-only behavior        = PASS
-Mock hard-fault/stale/reject injection     = PASS
-
-historical A@100 Hz numerical qualification = FAIL (J4 target step 0.0034906093335972943 rad > 0.003125 rad fixed gate)
-optimized A@100 Hz numerical qualification  = PASS (seed 20260918, attempt 18; design target 0.0028 rad PASS)
-optimized A exact-command Mock replay       = PASS (3001 samples, no catch-up burst, no dispatch timestamp mismatch)
-optimized A preview human acceptance        = PASS (`accepted_for_hardware: true`, reviewed 2026-09-09)
-real hardware state acceptance            = PENDING
-joint mapping verification                = PENDING
-J1 convention                             = UNRESOLVED
-real Servo hold                           = PENDING
-real small-motion validation              = NOT STARTED
-real Fourier excitation                   = NOT STARTED
-C++ ExperimentBackend integration         = DEFERRED
+simulation identification                    = PASS
+reBot hardware adapter / runner tests         = PASS
+Mock MoveJ / Servo / fault injection          = PASS
+A numerical qualification + human preview     = PASS
+B numerical qualification + human preview     = PASS
+A real excitation 2026-09-10                  = PASS, 2946 commands, ~98.15 Hz
+B real excitation 2026-09-10                  = PASS, 2940 commands, ~97.95 Hz
+A/B controlled cleanup                        = PASS
+lower/signal independent update cadence       = ~10 Hz on both successful real runs
+physical torque calibration                   = UNRESOLVED
+physical parameter recovery acceptance        = UNRESOLVED
+C++ ExperimentBackend integration             = DEFERRED
 ```
 
-`ExperimentBackend` remains deferred because both command semantics and recorder semantics
-mismatch the audited reBot hardware path:
+`ExperimentBackend` remains deferred because its command and recorder semantics do not match the audited reBot Servo path:
 
 ```text
 ControlCommand(position, velocity, kp, kd, torque)
@@ -589,5 +556,4 @@ ControlCommand(position, velocity, kp, kd, torque)
 ServoJoint(target_position_rad only)
 ```
 
-and the existing non-simulation C++ recorder still assigns finite-difference `qdd` and
-`command.torque` to a legacy ambiguous schema. Mock PASS is not real-hardware validation.
+The dedicated Python reBot runner therefore remains the authoritative real-hardware path. Mock PASS is software validation; the 2026-09-10 A/B metadata are the current real-execution evidence.

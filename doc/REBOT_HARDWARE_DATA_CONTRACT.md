@@ -1,8 +1,8 @@
 # reBot-DM Hardware State Data Contract
 
-Date: 2026-08-26  
-Scope: reBot-DM J1-J6 public state capture for future real-hardware identification  
-Status: implementation/offline gate; hardware acceptance is still pending
+Last updated: 2026-09-10
+Scope: reBot-DM J1-J6 public state/data semantics used by real-hardware identification
+Status: real A/B acquisition has been completed; `effort_reported` physical torque calibration remains unresolved
 
 ## 1. Purpose and boundary
 
@@ -35,11 +35,13 @@ No component in this path may call `enable`, `disable`, `configure_pvt`, `movej`
 
 ## 2. Audited SDK source of truth
 
-The external SDK was audited read-only at:
+The current accepted external SDK checkout is audited read-only at:
 
 ```text
-/home/wlsea1/桌面/机械臂sdk/wlsea_arm_sdk_sim_handoff_20260826
+/home/j/j_ws/src/wlsea_rebot_b601_upper_20260904
 ```
+
+Earlier handoff-package observations remain historical background only; current code/runtime behavior in the accepted checkout takes precedence.
 
 Primary files checked:
 
@@ -331,14 +333,9 @@ TCP session disconnect
 
 unconditionally.
 
-A TCP session is therefore not a strictly side-effect-free observation contract. The Phase
-6A recorder deliberately does **not** create a TCP session and does not instantiate
-`ArmClient`; it binds only the public UDP state port and decodes the public protocol.
+A TCP session is therefore not a strictly side-effect-free observation contract. The legacy UDP-only recorder deliberately does **not** create a TCP session and does not instantiate `ArmClient`; it binds only the public UDP state port and decodes the public protocol.
 
-This creates an important hardware-acceptance condition: with the current lower server, an
-independent UDP-only recorder may receive no data unless the lower software provides a
-side-effect-free public-state publication/subscription mode. Phase 6A does not modify the
-external SDK to solve that interface issue and does not bypass it by reading USB2CANFD.
+This creates an important boundary: with the current lower server, an independent UDP-only recorder may receive no data unless the lower software provides a side-effect-free public-state publication/subscription mode. The formal A/B experiment does not rely on that UDP-only recorder; it uses the audited `ArmClient`/`StateStore` path and records the resulting public state together with explicit control-session metadata.
 
 ## 11. Metadata sidecar
 
@@ -505,7 +502,7 @@ wlsea1
 but the lower/public-state publication contract must first support truly observation-only
 state delivery.
 
-## 15. Phase 6A acceptance boundary
+## 15. Legacy UDP-only recorder boundary
 
 The offline implementation can pass when:
 
@@ -517,10 +514,6 @@ The offline implementation can pass when:
 - static inspection proves the recorder path contains no motor-changing command call;
 - prior simulation identification and renderer regressions remain green.
 
-Even after that result, the correct hardware status remains:
+This UDP-only path is a diagnostic/data-source boundary and does not authorize motion by itself. Real A/B excitation authorization is defined by `REBOT_HARDWARE_CONTROL_CONTRACT.md` and the accepted frozen trajectory/preview evidence.
 
-```text
-hardware state_only acceptance = PENDING
-```
-
-No Servo hold or hardware excitation follows from this document.
+Current real A/B recordings confirm that the formal `ArmClient` path can capture the required public `q`, `qd`, `effort_reported`, validity, freshness, mode, fault and Servo-state fields through a complete excitation. They do **not** resolve the remaining interpretation boundary: `effort_reported` is still the SDK joint-side torque estimate, not an independently calibrated physical torque sensor measurement.

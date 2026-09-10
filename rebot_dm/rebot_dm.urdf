@@ -1,9 +1,11 @@
 <?xml version="1.0"?>
 <!--
-  Canonical Phase 4A dynamics URDF for reBot B601 DM with gripper.
-  Source provenance is recorded in doc/PHASE4_REBOT_DM_MODEL_BASELINE.md.
-  Visual/collision meshes are intentionally omitted in Phase 4A; geometry is deferred to Phase 4B.
-  Mass, COM, inertia, joint transforms, axes, and limits are preserved from the DM source model.
+  Canonical dynamics URDF for reBot B601 DM with gripper.
+  Long-term model/provenance semantics are documented in doc/ARCHITECTURE.md and
+  doc/REBOT_SYSTEM_IDENTIFICATION_GUIDE.md.
+  This dynamics URDF intentionally omits visual/collision meshes; runtime geometry is kept
+  in the dedicated MuJoCo/runtime model files. Mass, COM, inertia, joint transforms, axes,
+  and limits are preserved from the accepted DM source model.
 -->
 <robot name="rebot_b601_dm_phase4a">
   <link name="base_link">

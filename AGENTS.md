@@ -1,79 +1,96 @@
 # Project Instructions
 
-This repository is for robot dynamics parameter identification.
+This repository implements robot dynamics parameter identification for simulation and reBot real-hardware data.
 
-## Mandatory reading before work
+## Mandatory reading before changes
 
-Before modifying code, always read:
+Read, in order:
 
 1. `doc/ARCHITECTURE.md`
 2. `doc/DEVELOPMENT_RULES.md`
+3. `doc/REBOT_HARDWARE_CONTROL_CONTRACT.md` when touching real-hardware execution
+4. `doc/REBOT_HARDWARE_DATA_CONTRACT.md` when touching real-hardware data semantics
+5. `doc/REBOT_SYSTEM_IDENTIFICATION_GUIDE.md` for the supported operator workflow
 
-For the current development phase, also read:
+Historical development-phase documents are not source of truth and are not required reading.
 
-3. `doc/PHASE1_MINIMAL_PLAN.md`
-4. `doc/PHASE1_BASELINE.md` if it exists
+## External reBot SDK
 
-SDK：/home/j/j_ws/src/wlsea_rebot_b601_upper_20260904
+The accepted external SDK checkout is configured by the operator-facing YAML. The current field value is:
 
-Use `README.md` for build/run instructions.
+`/home/j/j_ws/src/wlsea_rebot_b601_upper_20260904`
 
-Do not treat `plan.md` as the current architecture unless explicitly requested.
+Do not vendor, edit, or silently patch that external SDK from this repository.
 
 ## Source-of-truth priority
 
-When documents disagree, use this priority:
+When descriptions conflict, use this order:
 
-1. actual current code and reproducible runtime behavior
-2. `AGENTS.md`
-3. `doc/ARCHITECTURE.md`
-4. `doc/DEVELOPMENT_RULES.md`
-5. current phase plan
-6. `README.md`
-7. historical plans
+1. actual code/runtime behavior and captured evidence;
+2. `AGENTS.md`;
+3. `doc/ARCHITECTURE.md`;
+4. `doc/DEVELOPMENT_RULES.md`;
+5. hardware control/data contracts;
+6. `doc/REBOT_SYSTEM_IDENTIFICATION_GUIDE.md`;
+7. `README.md`;
+8. historical Git history or deleted development notes.
 
-Never silently assume a document describes current behavior.
-If documentation and code disagree, report the mismatch before modifying code.
+Successful real runs and their `hardware.yaml`, `raw.meta.yaml`, frozen-artifact hashes, and preview-acceptance evidence override stale historical status prose.
 
 ## Before coding
 
-First report:
+For non-trivial changes, first state:
 
-1. Current behavior
-2. Problem
-3. Minimal proposed change
-4. Files to modify
-5. Files intentionally not modified
-6. Risks
-7. Validation method
+1. current behavior;
+2. problem;
+3. minimal proposed change;
+4. files to modify;
+5. files intentionally not modified;
+6. risks;
+7. validation method.
 
-Do not begin large refactors before this analysis.
+Do not ask the user for facts that can be established from code, configuration, or recorded evidence.
 
-## Parameter-identification safety
+## High-risk semantics
 
-Treat these as high-risk semantics:
+Do not silently change the meaning of:
 
-- q
-- qd
-- qdd
-- tau_cmd
-- tau_effort
-- torque source
-- regressor
-- parameter ordering
-- inverse dynamics
-- gravity/friction models
+- `q`, `qd`, acceleration, effort/torque, timestamps, joint mapping, units, or frames;
+- A-only fitting versus B-only validation;
+- frozen trajectory artifacts, SHA-256 provenance, or preview acceptance;
+- MoveJ preposition semantics;
+- Servo position-command semantics;
+- feedback freshness, Servo ownership, hard faults, or controlled cleanup;
+- tracking warning semantics (monitor-only during formal excitation);
+- recorder schema or preprocessing/identification target columns.
 
-Never change or reinterpret these silently.
+Any required semantic change must be explicit, documented, tested, and justified from source evidence.
 
-## Current project principle
+## Architecture preference
 
-Prefer:
+Prefer the smallest compatible change. Reuse existing runner, recorder, preprocessing, and identification code. Do not introduce factory/manager/plugin frameworks or copy a verified Servo loop merely to make a new entry point look cleaner.
 
-understand baseline
-→ verify data semantics
-→ fix P0/P1 issues
-→ integrate reBot minimally
-→ refactor only when demonstrated necessary
+For formal reBot A/B operation, the supported operator-facing entry is:
 
-Do not introduce factories, plugin systems, or generic robot frameworks only for possible future use.
+```bash
+python3 scripts/run_rebot_real_ab.py --config config/rebot_real_ab.yaml
+```
+
+The lower-level hardware, preprocessing, diagnostic, and identification scripts remain available for advanced/debug use. They are not the normal operator workflow.
+
+## Real-hardware safety
+
+Never infer hardware authorization from a simulation result. The formal real workflow must preserve:
+
+- accepted frozen trajectory + matching metadata + accepted preview;
+- preflight before client creation;
+- explicit per-trajectory operator ENTER gate;
+- MoveJ to excitation `q0`, settle, Servo excitation, controlled cleanup;
+- immediate fail-safe for hard faults, communication/state-stream loss, invalid/stale feedback beyond the audited recovery semantics, Servo reject, or unexpected Servo ownership loss;
+- A failure blocks B; B failure blocks identification.
+
+`--mock` must never instantiate the real SDK client. `--preflight-only` must never instantiate any hardware client.
+
+## Interpretation boundary
+
+Real `effort_reported` is the SDK-reported joint-side effort estimate used as the current offline fitting target. It is not yet independently calibrated physical torque. Low reported-effort prediction error must not be reported as proof of physically correct inertial/friction parameters.
