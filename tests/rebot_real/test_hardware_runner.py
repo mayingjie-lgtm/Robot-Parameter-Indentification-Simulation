@@ -155,6 +155,28 @@ class RebotHardwareRunnerTest(unittest.TestCase):
             config["maximum_feedback_age_ms"],
         )
 
+    def test_real_excitation_missing_controlled_park_policy_fails_before_connect(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = yaml.safe_load(
+                (REPO_ROOT / "config" / "rebot_excitation_actual_time_pending.yaml").read_text()
+            )
+            source.update(
+                allow_hardware=True,
+                allow_motion=True,
+                joint_mapping_verified=True,
+                joint_mapping_scope="excitation_smoke",
+                j1_convention="PHYSICAL_MARK_PI_CENTERED_VISUAL_20260907",
+            )
+            source.pop("controlled_park_before_disable", None)
+            config_path = Path(directory) / "missing_park.yaml"
+            config_path.write_text(yaml.safe_dump(source, sort_keys=False))
+            fake = MockArmClient()
+            with self.assertRaisesRegex(
+                ValueError, "explicit controlled_park_before_disable policy"
+            ):
+                load_hardware_config(config_path, repo_root=REPO_ROOT)
+            self.assertEqual(fake.calls, [])
+
     def test_non_catchup_deadline_preserves_100hz_period_after_late_dispatch(self) -> None:
         period_s = 0.010
         for elapsed_s in (0.0115, 0.014, 0.022):
@@ -410,7 +432,7 @@ class RebotHardwareRunnerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             config = self._servo_config(directory)
             config["maximum_disabled_feedback_age_ms"] = 110.0
-            config["maximum_feedback_age_ms"] = 50.0
+            config["motion_ready_feedback_max_age_ms"] = 50.0
             fake = FreshOnSecondEnabledFrame(feedback_age_ms=[100.0] * 6)
             self._runner(config, fake).run()
             enable_index = fake.calls.index("enable")
@@ -421,7 +443,7 @@ class RebotHardwareRunnerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             config = self._servo_config(directory)
             config["maximum_disabled_feedback_age_ms"] = 110.0
-            config["maximum_feedback_age_ms"] = 50.0
+            config["motion_ready_feedback_max_age_ms"] = 50.0
             config["command_timeout_s"] = 0.01
             fake = MockArmClient(feedback_age_ms=[100.0] * 6)
             with self.assertRaisesRegex(
@@ -683,7 +705,7 @@ class RebotHardwareRunnerTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             config = self._excitation_config(directory)
-            config["state_timeout_s"] = 0.02
+            config["host_state_snapshot_timeout_s"] = 0.02
             fake = FreezeAfterFirstArtifactTarget(
                 position_rad=[0.0, 0.0, 0.0, 0.0, 0.0, math.pi / 2],
                 follow_movej_targets=True,
@@ -698,7 +720,7 @@ class RebotHardwareRunnerTest(unittest.TestCase):
             self.assertEqual(failure["stage"], "excitation_state_snapshot")
             self.assertLessEqual(
                 failure["artifact_time_s"],
-                config["state_timeout_s"] + 1.5 / config["control_rate_hz"],
+                config["host_state_snapshot_timeout_s"] + 1.5 / config["control_rate_hz"],
             )
             self.assertGreater(failure["state_snapshot_age_ms"], 20.0)
             for key in (
@@ -925,38 +947,183 @@ class RebotHardwareRunnerTest(unittest.TestCase):
             self.assertFalse(metadata["identification_data_quality"]["accepted"])
             self.assertEqual(fake.calls[-2:], ["disable", "close"])
 
-    def test_excitation_runtime_freshness_and_fault_gates_keep_fail_safe_cleanup_order(self) -> None:
-        for injection, expected_error in (
-            ("freshness", "feedback stale"),
-            ("fault", "primary fault active"),
-        ):
-            with self.subTest(injection=injection), tempfile.TemporaryDirectory() as directory:
-                class InjectRuntimeStateFailure(MockArmClient):
-                    def servo_joint(self, *args, **kwargs):
-                        reply = super().servo_joint(*args, **kwargs)
-                        if len(self.servo_targets) == 2:
-                            if injection == "freshness":
-                                self.feedback_age_ms = (101.0,) * 6
-                            else:
-                                self.primary_fault_code = 200204
-                        return reply
+    def test_excitation_100ms_boundary_jitter_does_not_false_abort(self) -> None:
+        class InjectBoundaryAge(MockArmClient):
+            def servo_joint(self, *args, **kwargs):
+                reply = super().servo_joint(*args, **kwargs)
+                if len(self.servo_targets) == 2:
+                    self.feedback_age_ms = (100.05,) * 6
+                return reply
 
-                config = self._excitation_config(directory)
-                fake = InjectRuntimeStateFailure(
-                    position_rad=[0.0, 0.0, 0.0, 0.0, 0.0, math.pi / 2],
-                    follow_movej_targets=True,
-                    follow_servo_targets=True,
-                )
-                with self.assertRaisesRegex(RebotControlError, expected_error):
-                    self._runner(config, fake).run()
-                metadata = yaml.safe_load(
-                    Path(config["output_csv"]).with_suffix(".meta.yaml").read_text()
-                )
-                self.assertEqual(
-                    metadata["failure"]["stage"], "excitation_state_snapshot"
-                )
-                self.assertEqual(metadata["shutdown"]["strategy"], "fail_safe")
-                self.assertEqual(fake.calls[-3:], ["exit_servo", "disable", "close"])
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._excitation_config(directory)
+            fake = InjectBoundaryAge(
+                position_rad=[0.0, 0.0, 0.0, 0.0, 0.0, math.pi / 2],
+                follow_movej_targets=True,
+                follow_servo_targets=True,
+            )
+            metadata = self._runner(config, fake).run()
+            self.assertNotIn("failure", metadata)
+            self.assertEqual(metadata["motion_status"], "completed")
+            self.assertNotEqual(metadata["shutdown"]["strategy"], "fail_safe")
+
+    def test_excitation_valid_feedback_between_100_and_250ms_is_allowed(self) -> None:
+        class InjectHealthyLowerAge(MockArmClient):
+            def servo_joint(self, *args, **kwargs):
+                reply = super().servo_joint(*args, **kwargs)
+                if len(self.servo_targets) == 2:
+                    self.feedback_age_ms = (249.0,) * 6
+                return reply
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._excitation_config(directory)
+            fake = InjectHealthyLowerAge(
+                position_rad=[0.0, 0.0, 0.0, 0.0, 0.0, math.pi / 2],
+                follow_movej_targets=True,
+                follow_servo_targets=True,
+            )
+            metadata = self._runner(config, fake).run()
+            self.assertEqual(metadata["motion_status"], "completed")
+            self.assertEqual(
+                metadata["runtime_servo_envelope"]["feedback_runtime"][
+                    "measurement_unusable_sample_count"
+                ],
+                0,
+            )
+
+    def test_excitation_transient_invalid_feedback_recovers_without_disable(self) -> None:
+        class TransientInvalidMock(MockArmClient):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self._invalid_reads_remaining = 0
+                self._injected = False
+
+            def servo_joint(self, *args, **kwargs):
+                reply = super().servo_joint(*args, **kwargs)
+                if len(self.servo_targets) == 2 and not self._injected:
+                    self._injected = True
+                    self._invalid_reads_remaining = 3
+                return reply
+
+            @property
+            def state_store(self):
+                if self._invalid_reads_remaining > 0:
+                    self.feedback_valid = (False,) * 6
+                    self._invalid_reads_remaining -= 1
+                elif self._injected:
+                    self.feedback_valid = (True,) * 6
+                return MockArmClient.state_store.fget(self)
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._excitation_config(directory)
+            fake = TransientInvalidMock(
+                position_rad=[0.0, 0.0, 0.0, 0.0, 0.0, math.pi / 2],
+                follow_movej_targets=True,
+                follow_servo_targets=True,
+            )
+            metadata = self._runner(config, fake).run()
+            self.assertEqual(metadata["motion_status"], "completed")
+            self.assertGreater(
+                metadata["runtime_servo_envelope"]["feedback_runtime"][
+                    "measurement_unusable_sample_count"
+                ],
+                0,
+            )
+            self.assertGreater(
+                metadata["tracking_quality"]["measurement_unusable_row_count"], 0
+            )
+            with Path(config["output_csv"]).open("r", encoding="utf-8", newline="") as stream:
+                rows = list(csv.DictReader(stream))
+            self.assertTrue(
+                any(row["feedback_valid0"] == "0" for row in rows)
+            )
+
+    def test_excitation_persistent_invalid_feedback_aborts_after_recovery_window(self) -> None:
+        class PersistentInvalidMock(MockArmClient):
+            def servo_joint(self, *args, **kwargs):
+                reply = super().servo_joint(*args, **kwargs)
+                if len(self.servo_targets) == 2:
+                    self.feedback_valid = (False,) * 6
+                return reply
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._excitation_config(directory)
+            config["command_timeout_s"] = 0.03
+            fake = PersistentInvalidMock(
+                position_rad=[0.0, 0.0, 0.0, 0.0, 0.0, math.pi / 2],
+                follow_movej_targets=True,
+                follow_servo_targets=True,
+            )
+            with self.assertRaisesRegex(
+                RebotControlError, "transient feedback invalid exceeded recovery window"
+            ):
+                self._runner(config, fake).run()
+            metadata = yaml.safe_load(
+                Path(config["output_csv"]).with_suffix(".meta.yaml").read_text()
+            )
+            self.assertEqual(metadata["failure"]["stage"], "excitation_state_snapshot")
+            self.assertGreater(len(fake.servo_targets), 2)
+
+    def test_excitation_primary_fault_remains_immediate_fail_safe(self) -> None:
+        class InjectPrimaryFault(MockArmClient):
+            def servo_joint(self, *args, **kwargs):
+                reply = super().servo_joint(*args, **kwargs)
+                if len(self.servo_targets) == 2:
+                    self.primary_fault_code = 200204
+                return reply
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._excitation_config(directory)
+            fake = InjectPrimaryFault(
+                position_rad=[0.0, 0.0, 0.0, 0.0, 0.0, math.pi / 2],
+                follow_movej_targets=True,
+                follow_servo_targets=True,
+            )
+            with self.assertRaisesRegex(RebotControlError, "primary fault active"):
+                self._runner(config, fake).run()
+            metadata = yaml.safe_load(
+                Path(config["output_csv"]).with_suffix(".meta.yaml").read_text()
+            )
+            self.assertEqual(metadata["shutdown"]["strategy"], "fail_safe")
+            self.assertEqual(fake.calls[-3:], ["exit_servo", "disable", "close"])
+
+    def test_recoverable_feedback_abort_reacquires_health_then_parks(self) -> None:
+        class RecoverOnExitServoMock(MockArmClient):
+            def servo_joint(self, *args, **kwargs):
+                reply = super().servo_joint(*args, **kwargs)
+                if len(self.servo_targets) == 2:
+                    self.feedback_valid = (False,) * 6
+                return reply
+
+            def exit_servo(self, *args, **kwargs):
+                reply = super().exit_servo(*args, **kwargs)
+                self.feedback_valid = (True,) * 6
+                self.feedback_age_ms = (1.0,) * 6
+                return reply
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._excitation_config(directory)
+            fake = RecoverOnExitServoMock(
+                position_rad=[0.0, 0.0, 0.0, 0.0, 0.0, math.pi / 2],
+                follow_movej_targets=True,
+                follow_servo_targets=True,
+            )
+            with self.assertRaisesRegex(
+                RebotControlError, "transient feedback invalid exceeded recovery window"
+            ):
+                self._runner(config, fake).run()
+            metadata = yaml.safe_load(
+                Path(config["output_csv"]).with_suffix(".meta.yaml").read_text()
+            )
+            self.assertEqual(metadata["shutdown"]["strategy"], "controlled_park")
+            self.assertEqual(metadata["shutdown"]["park_status"], "completed")
+            exit_index = fake.calls.index("exit_servo")
+            stop_index = fake.calls.index("stop", exit_index)
+            movej_index = fake.calls.index("movej", stop_index)
+            disable_index = fake.calls.index("disable", movej_index)
+            self.assertLess(exit_index, stop_index)
+            self.assertLess(stop_index, movej_index)
+            self.assertLess(movej_index, disable_index)
 
     def test_excitation_servo_reject_records_attempt_and_sdk_diagnostics(self) -> None:
         class RejectFirstArtifactTargetMock(MockArmClient):
@@ -1113,6 +1280,7 @@ class RebotHardwareRunnerTest(unittest.TestCase):
             config["joint_mapping_verified"] = True
             config["j1_convention"] = "PHYSICAL_MARK_PI_CENTERED_VISUAL_20260907"
             config["joint_mapping_scope"] = "excitation_smoke"
+            config["controlled_park_before_disable"] = True
             self._runner(config, MockArmClient(), mock_backend=False)._assert_session_authorized(
                 "excitation"
             )
@@ -1125,6 +1293,7 @@ class RebotHardwareRunnerTest(unittest.TestCase):
             config["joint_mapping_verified"] = True
             config["j1_convention"] = "PHYSICAL_MARK_PI_CENTERED_VISUAL_20260907"
             config["joint_mapping_scope"] = "excitation"
+            config["controlled_park_before_disable"] = True
             with self.assertRaisesRegex(PermissionError, "excitation_smoke only"):
                 self._runner(config, MockArmClient(), mock_backend=False)._assert_session_authorized(
                     "excitation"

@@ -35,11 +35,14 @@ movej_timeout_s: 60.0
 controlled_park_before_disable: true
 start_position_tolerance_rad: 0.01
 preposition_settle_velocity_tolerance_rad_s: 0.01
-maximum_feedback_age_ms: 100.0
+motion_ready_feedback_max_age_ms: 100.0
 maximum_disabled_feedback_age_ms: 50.0
+lower_feedback_timeout_ms: 250.0
+transient_feedback_invalid_recovery_ms: 100.0
 connect_timeout_s: 3.0
 command_timeout_s: 3.0
 state_timeout_s: 0.25
+host_state_snapshot_timeout_s: 0.25
 
 trajectory_source: frozen_replay_artifact
 trajectory_replay_mode: actual_time_quintic_v1

@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import math
 import sys
 import time
 from pathlib import Path
+
+import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -34,6 +38,104 @@ def _tuple_text(values, *, scale: float = 1.0, digits: int = 3) -> str:
     return "[" + ", ".join(f"{float(value) * scale:.{digits}f}" for value in values) + "]"
 
 
+def _percentile(values: list[float], percentile: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * percentile / 100.0
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return ordered[lower]
+    fraction = position - lower
+    return ordered[lower] * (1.0 - fraction) + ordered[upper] * fraction
+
+
+def _offline_report(metadata_path: Path, csv_path: Path | None) -> int:
+    metadata = yaml.safe_load(metadata_path.read_text(encoding="utf-8"))
+    cadence = metadata.get("feedback_cadence") or {}
+    timing = metadata.get("dispatch_timing") or {}
+    if csv_path is None:
+        name = metadata_path.name
+        csv_path = (
+            metadata_path.with_name(name[: -len(".meta.yaml")] + ".csv")
+            if name.endswith(".meta.yaml")
+            else None
+        )
+    ages: list[float] = []
+    if csv_path is not None and csv_path.is_file():
+        with csv_path.open("r", encoding="utf-8", newline="") as stream:
+            for row in csv.DictReader(stream):
+                for joint in range(6):
+                    try:
+                        value = float(row[f"feedback_age_ms{joint}"])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    if math.isfinite(value):
+                        ages.append(value)
+
+    def rate(section: str) -> float | None:
+        value = cadence.get(section, {}).get("effective_rate_hz")
+        return None if value is None else float(value)
+
+    print("OFFLINE_ONLY: no SDK import, connection, or hardware command")
+    print(f"metadata={metadata_path}")
+    if csv_path is not None:
+        print(f"csv={csv_path}")
+    print(f"command_dispatch_rate_hz={timing.get('effective_command_rate_hz')}")
+    print(f"udp_host_publication_rate_hz={rate('timestamp_host_rx_cadence')}")
+    print(f"lower_timestamp_update_rate_hz={rate('timestamp_lower_update_cadence_on_host')}")
+    print(f"q_update_rate_hz={rate('q_update_cadence_on_host')}")
+    print(f"qd_update_rate_hz={rate('qd_update_cadence_on_host')}")
+    print(f"effort_update_rate_hz={rate('effort_update_cadence_on_host')}")
+    print(f"duplicate_snapshot_count={cadence.get('duplicate_state_snapshot_count')}")
+    print(f"feedback_age_p50_ms={_percentile(ages, 50.0)}")
+    print(f"feedback_age_p95_ms={_percentile(ages, 95.0)}")
+    print(f"feedback_age_max_ms={max(ages) if ages else None}")
+    print("rate_semantics=CSV/command rate is not the independent physical measurement rate")
+
+    failure = metadata.get("failure") or {}
+    failure_ages = [
+        float(value)
+        for value in (failure.get("feedback_age_ms") or [])
+        if value is not None and math.isfinite(float(value))
+    ]
+    sdk_safety = metadata.get("sdk_safety_config_snapshot") or {}
+    lower_timeout_ms = float(
+        metadata.get(
+            "lower_feedback_timeout_ms",
+            sdk_safety.get("feedback_timeout_ms", 250.0),
+        )
+    )
+    host_timeout_s = float(
+        metadata.get(
+            "host_state_snapshot_timeout_s",
+            metadata.get("state_timeout_s", 0.25),
+        )
+    )
+    if (
+        failure.get("stage") == "excitation_state_snapshot"
+        and failure_ages
+        and max(failure_ages) <= lower_timeout_ms
+        and float(failure.get("state_snapshot_age_ms", math.inf))
+        <= host_timeout_s * 1000.0
+        and int(failure.get("primary_fault_code", -1)) == 0
+        and (
+            failure.get("servo_active") is True
+            or failure.get("servo_mode") == "servo"
+        )
+    ):
+        print(
+            "historical_failure_classification=legacy_100ms_host_gate_false_positive; "
+            "this snapshot alone should not be an immediate abort under the repaired semantics"
+        )
+        print(
+            "classification_scope=does_not_predict_that_the_remaining excitation would "
+            "complete without a later real fault"
+        )
+    return 0
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -48,6 +150,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--duration", type=float, default=3.0)
     parser.add_argument("--period", type=float, default=0.10)
     parser.add_argument(
+        "--offline-metadata",
+        type=Path,
+        help="analyze an existing raw.meta.yaml without importing or connecting the SDK",
+    )
+    parser.add_argument(
+        "--offline-csv",
+        type=Path,
+        help="optional raw.csv paired with --offline-metadata for feedback-age percentiles",
+    )
+    parser.add_argument(
         "--no-fault-query",
         action="store_true",
         help="skip read-only get_active_faults/fault_explain TCP queries",
@@ -57,6 +169,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.offline_metadata is not None:
+        return _offline_report(args.offline_metadata, args.offline_csv)
+    if args.offline_csv is not None:
+        raise SystemExit("--offline-csv requires --offline-metadata")
     if args.duration <= 0.0 or args.period <= 0.0:
         raise SystemExit("--duration and --period must be positive")
 

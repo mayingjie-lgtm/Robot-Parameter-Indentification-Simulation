@@ -42,8 +42,7 @@ canonical URDF SHA-256 97c8c5a23a637dea894cfa731dd6d2676af89dd91001ff73f2bc1ffa4
   `q_model_J1 = q_sdk_J1 - pi`；
 - J1 机械刻线为目测对齐，双向接近读数相差约 `1.85784 deg`，只允许用于 Servo
   当前位保持 smoke，不得声称是辨识级零位标定；
-- disabled 六轴反馈约每 100 ms 刷新一次，因此使能前使用 110 ms 门限；使能后和
-  Servo 期间仍使用 50 ms 门限；
+- 2026-09-07 的 Servo-hold smoke 曾按 disabled 约 100 ms 刷新使用 110 ms 使能前门限、50 ms Servo 门限；该记录属于历史配置。当前 excitation 已拆分为 `motion_ready_feedback_max_age_ms`、`lower_feedback_timeout_ms`、`transient_feedback_invalid_recovery_ms` 与 `host_state_snapshot_timeout_s`，不得继续把旧 `maximum_feedback_age_ms` 当作 excitation runtime 的统一硬门限；
 - canonical URDF 与 SDK 组合 URDF 的 J6 origin x 相差 `0.004316 m`，真机辨识前必须
   解决；
 - `effort_reported` 仍未独立标定，不能视为可信 `tau_measured`。
@@ -1201,7 +1200,7 @@ allow_motion: true
 
 ```bash
 grep -nE \
-  "control_mode|control_rate_hz|duration_s|allow_hardware|allow_motion|joint_mapping_verified|joint_mapping_scope|j1_convention|trajectory_replay_mode|trajectory_hash|maximum_feedback_age_ms|maximum_disabled_feedback_age_ms" \
+  "control_mode|control_rate_hz|duration_s|allow_hardware|allow_motion|joint_mapping_verified|joint_mapping_scope|j1_convention|trajectory_replay_mode|trajectory_hash|controlled_park_before_disable|motion_ready_feedback_max_age_ms|maximum_disabled_feedback_age_ms|lower_feedback_timeout_ms|transient_feedback_invalid_recovery_ms|host_state_snapshot_timeout_s" \
   "$RUN_DIR/hardware.yaml"
 
 sha256sum \
@@ -1787,7 +1786,7 @@ temperature numeric thresholds 等仍有未标定/禁用项，所以“lower 没
 
 A_run03 的真实 dispatch 证据表明，公开同步 `ArmClient.servo_joint()` 路径在当前主机/Lower 链路下实际约为 100 Hz：303 个 excitation command 的 mean dispatch interval 约 9.9996 ms，effective rate 约 100.004 Hz。配置 200 Hz 并不会让同步 ACK 路径变成真实 200 Hz；旧 5 ms synthetic timestamp 反而会持续偏离实际发送时间。
 
-因此当前 hardware replay 候选统一按 **100 Hz nominal grid / 10 ms non-catch-up floor** 重新 qualification。Servo replay 仍复用最新 UDP snapshot，不逐包阻塞等待新 frame，并用 `state_timeout_s` 单独限制 host snapshot age；Lower 内部仍有自己的高频控制。正式轨迹频率必须继续根据实测：
+因此当前 hardware replay 候选统一按 **100 Hz nominal grid / 10 ms non-catch-up floor** 重新 qualification。Servo replay 仍复用最新 UDP snapshot，不逐包阻塞等待新 frame，并用 `host_state_snapshot_timeout_s` 单独限制 host snapshot age；`state_timeout_s` 只控制阻塞式 state read timeout。Lower 内部仍有自己的高频控制。正式轨迹频率必须继续根据实测：
 
 - upper command acceptance；
 - UDP feedback rate；
@@ -1798,6 +1797,50 @@ A_run03 的真实 dispatch 证据表明，公开同步 `ArmClient.servo_joint()`
 选择并冻结。这里的 100 Hz 是当前公开同步 SDK 路径的可持续候选，不等于 Lower 控制环频率，也不意味着任何旧 200 Hz artifact 自动获得 100 Hz hardware acceptance。
 
 特别注意：采样率降低会增大同一连续 Fourier 轨迹的相邻 `q_ref` 步长。A@100 Hz 当前 J4 最大 step `0.0034906093336 rad` 已超过 Lower 固定 `0.003125 rad` gate，因此**不能**用“实际只有 100 Hz”作为直接执行旧 A 的理由；必须重新生成满足固定单包 jump gate 的 A artifact。
+
+### 16.3.1 当前 excitation feedback freshness / recovery 语义
+
+2026-09-09 的 `A_run01` 在 `trajectory_time≈1.864 s` 处曾因旧 upper `100 ms` feedback-age gate 中止。离线证据同时显示：失败点六轴 feedback age 约 `100.05 ms`、upper-host state snapshot age 约 `4.09 ms`、`primary_fault_code=0`、Servo 仍处于 active/servo 状态；整段已记录数据的 command dispatch 约 `98.16 Hz`，host UDP publication 约 `96.28 Hz`，但 q/qd/effort 独立更新只有约 `9–10 Hz`。因此 **100 Hz CSV/command row rate 不能解释成 100 Hz 独立物理测量率**。
+
+当前 repaired semantics 明确拆分：
+
+```text
+maximum_disabled_feedback_age_ms
+  -> disabled / pre-enable observation
+motion_ready_feedback_max_age_ms
+  -> conservative motion-ready / ordinary Servo validation
+lower_feedback_timeout_ms = 250 ms
+  -> audited Lower freshness boundary used by excitation measurement usability
+transient_feedback_invalid_recovery_ms = 100 ms
+  -> bounded transient-invalid recovery window; not a new measurement-valid window
+host_state_snapshot_timeout_s = 0.25 s
+  -> upper-host UDP snapshot freshness
+state_timeout_s = 0.25 s
+  -> blocking state-read timeout only
+```
+
+在 excitation hot loop 中，约 `100–250 ms` 的 Lower-reported feedback age 本身不再触发旧 100 ms false-positive。若 `feedback_valid=false`，该 row 必须保留 `feedback_valid` 与 `feedback_age_ms` 诊断信息，但 q/qd 继续写 NaN，并从 tracking / identification-quality 统计中排除；只有在限定 recovery window 内恢复后才可继续。`primary_fault_code != 0`、unsafe safety state、host snapshot 超时、Servo ownership 丢失、Servo reject/command failure 或畸形/非有限的有效反馈仍是 hard failure，不得用 recovery 机制掩盖。
+
+可用以下完全离线命令复查历史 A_run01，不会 import/connect SDK，也不会发送任何硬件命令：
+
+```bash
+python3 scripts/diagnose_rebot_feedback.py \
+  --offline-metadata data/rebot_real/20260909_172224_servo_safe_100hz_optimized/A_run01/raw.meta.yaml \
+  --offline-csv data/rebot_real/20260909_172224_servo_safe_100hz_optimized/A_run01/raw.csv
+```
+
+预期包含：
+
+```text
+OFFLINE_ONLY: no SDK import, connection, or hardware command
+historical_failure_classification=legacy_100ms_host_gate_false_positive
+```
+
+该 classification 只说明**历史这个具体中止点不应由旧 100 ms upper gate 立即终止**，不预测剩余 30 s 一定不会出现其他真实 fault。
+
+### 16.3.2 controlled park 与 fail-safe 边界
+
+新的真实 `excitation` 配置必须显式包含 `controlled_park_before_disable: true`；字段缺失或为 false 时，在创建真实 `ArmClient` 前即 fail closed。正常结束或可恢复的 feedback abort，runner 在退出 Servo 后重新获得健康 enabled state，必要时 stop，再按 SDK park policy MoveJ park，settle 后 disable/close。对于 primary fault、unsafe safety state、host state-stream loss、Servo reject 等 hard failure，则**跳过自动 park**并进入 fail-safe cleanup；不能为了避免失能下落而强制在故障态继续 MoveJ。
 
 ## 16.4 R6：冻结 A/B
 

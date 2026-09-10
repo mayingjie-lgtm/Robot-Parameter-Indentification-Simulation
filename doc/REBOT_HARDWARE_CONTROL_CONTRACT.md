@@ -218,9 +218,10 @@ The upper layer implements only fail-fast checks:
 - excitation packet `qd/qdd/jerk`, recursively finite-differenced from SDK-accepted targets using their real host timestamps;
 - ServoCore timestamp interval `[0.5 ms, 100 ms]` before dispatch;
 - target-to-measured tracking error (`maximum_tracking_error_rad`, never divided by rate): runtime gate for hold/jog, but monitor-only quality evidence during `excitation`;
-- feedback validity;
-- feedback age;
-- upper-host UDP snapshot age against `state_timeout_s`;
+- feedback validity and Lower-reported feedback age, with mode-specific semantics rather than one shared abort threshold;
+- `motion_ready_feedback_max_age_ms` for conservative pre-motion / ordinary Servo state validation;
+- during `excitation`, `lower_feedback_timeout_ms` defines the Lower freshness boundary and `transient_feedback_invalid_recovery_ms` permits only a bounded transient-invalid recovery window; invalid rows retain `feedback_age_ms` telemetry while `q/qd` remain NaN and are excluded from tracking/identification quality;
+- upper-host UDP snapshot age against `host_state_snapshot_timeout_s`; `state_timeout_s` remains the blocking state-read timeout and is not the excitation hot-loop freshness threshold;
 - primary fault and lower safety-state rejection;
 - Servo-active state check;
 - state/command communication timeout.
@@ -520,14 +521,27 @@ movej_max_jerk_rad_s3
 movej_timeout_s
 start_position_tolerance_rad
 preposition_settle_velocity_tolerance_rad_s
-maximum_feedback_age_ms
+motion_ready_feedback_max_age_ms
 maximum_disabled_feedback_age_ms
+lower_feedback_timeout_ms
+transient_feedback_invalid_recovery_ms
+host_state_snapshot_timeout_s
+state_timeout_s
+controlled_park_before_disable
 control_rate_hz
 ```
 
-`maximum_disabled_feedback_age_ms` 仅适用于失能状态观测和 Servo 使能前检查；省略或
-设为 `null` 时回退到 `maximum_feedback_age_ms`，保持旧配置行为。使能完成后以及整个
-Servo 生命周期始终使用更严格的 `maximum_feedback_age_ms`。
+`maximum_feedback_age_ms` 现在只作为旧配置兼容别名；新 excitation 配置不得把它解释成
+runtime 的统一硬中止门限。`maximum_disabled_feedback_age_ms` 只用于失能状态观测和使能前
+检查；`motion_ready_feedback_max_age_ms` 用于运动准备/普通 Servo 状态检查。当前 audited
+Lower freshness boundary 为 `lower_feedback_timeout_ms=250 ms`，并配合
+`transient_feedback_invalid_recovery_ms=100 ms` 的有限恢复窗口。`host_state_snapshot_timeout_s`
+独立限制上位机最新 UDP snapshot 的接收年龄；`state_timeout_s` 只控制阻塞式状态读取等待。
+
+真实 `excitation` 还必须在创建硬件会话之前显式配置
+`controlled_park_before_disable: true`。缺失或为 false 都 fail closed；这不代表任何 hard fault
+都必须 MoveJ park，primary fault、unsafe safety state、host state-stream loss、Servo reject 等
+仍走 fail-safe 路径并跳过自动 park。
 
 Recommended real acceptance order remains:
 
@@ -556,7 +570,7 @@ Mock hard-fault/stale/reject injection     = PASS
 historical A@100 Hz numerical qualification = FAIL (J4 target step 0.0034906093335972943 rad > 0.003125 rad fixed gate)
 optimized A@100 Hz numerical qualification  = PASS (seed 20260918, attempt 18; design target 0.0028 rad PASS)
 optimized A exact-command Mock replay       = PASS (3001 samples, no catch-up burst, no dispatch timestamp mismatch)
-optimized A preview human acceptance        = PENDING (`accepted_for_hardware: false`)
+optimized A preview human acceptance        = PASS (`accepted_for_hardware: true`, reviewed 2026-09-09)
 real hardware state acceptance            = PENDING
 joint mapping verification                = PENDING
 J1 convention                             = UNRESOLVED

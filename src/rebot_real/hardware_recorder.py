@@ -278,13 +278,39 @@ class HardwareExperimentRecorder:
         if self.config.get("control_mode") != "excitation" or not self.csv_path.is_file():
             return None
         with self.csv_path.open("r", encoding="utf-8", newline="") as stream:
-            rows = [
+            command_rows = [
                 row
                 for row in csv.DictReader(stream)
                 if row["control_mode"] == "excitation" and row["command_valid"] == "1"
             ]
-        if not rows:
+        if not command_rows:
             return None
+        lower_timeout_ms = float(self.config["lower_feedback_timeout_ms"])
+        rows = [
+            row
+            for row in command_rows
+            if all(row[f"feedback_valid{joint}"] == "1" for joint in range(JOINT_COUNT))
+            and all(
+                float(row[f"feedback_age_ms{joint}"]) <= lower_timeout_ms
+                for joint in range(JOINT_COUNT)
+            )
+        ]
+        unusable_count = len(command_rows) - len(rows)
+        if not rows:
+            return {
+                "semantics": (
+                    "monitor_only_during_excitation; rows with invalid or Lower-timeout-stale "
+                    "measurements are excluded from q_ref-q quality checks"
+                ),
+                "status": "no_usable_measurements",
+                "command_row_count": len(command_rows),
+                "measurement_usable_row_count": 0,
+                "measurement_unusable_row_count": unusable_count,
+                "lower_feedback_timeout_ms": lower_timeout_ms,
+                "warning_threshold_rad": list(self.config["maximum_tracking_error_rad"]),
+                "threshold_exceed_sample_count": 0,
+                "per_joint": {},
+            }
 
         thresholds = [float(value) for value in self.config["maximum_tracking_error_rad"]]
         def trajectory_time(row: dict[str, str]) -> float:
@@ -334,9 +360,14 @@ class HardwareExperimentRecorder:
         return {
             "semantics": (
                 "monitor_only_during_excitation; threshold exceedance is a "
-                "control/identification-quality warning, not an immediate fail-safe"
+                "control/identification-quality warning, not an immediate fail-safe; "
+                "invalid or Lower-timeout-stale measurement rows are excluded"
             ),
             "status": "warning" if unique_exceed_rows else "within_warning_thresholds",
+            "command_row_count": len(command_rows),
+            "measurement_usable_row_count": len(rows),
+            "measurement_unusable_row_count": unusable_count,
+            "lower_feedback_timeout_ms": lower_timeout_ms,
             "warning_threshold_rad": thresholds,
             "threshold_exceed_sample_count": len(unique_exceed_rows),
             "first_threshold_exceed_sample_index": (
@@ -433,12 +464,14 @@ class HardwareExperimentRecorder:
             "feedback_age_ms": {
                 "min": None if not ages else min(ages),
                 "mean": None if not ages else sum(ages) / len(ages),
+                "p50": None if not ages else _percentile(ages, 50.0),
                 "p95": None if not ages else _percentile(ages, 95.0),
                 "max": None if not ages else max(ages),
             },
             "rate_semantics": (
-                "command dispatch rate, UDP host-receive publication cadence, and "
-                "lower/signal feedback update cadence are distinct quantities"
+                "command dispatch rate, CSV row rate, UDP host-receive publication cadence, "
+                "and lower/signal feedback update cadence are distinct quantities; a 100 Hz "
+                "CSV does not imply 100 Hz independent physical measurements"
             ),
         }
 
@@ -547,12 +580,26 @@ def build_hardware_metadata(
             config["preposition_settle_velocity_tolerance_rad_s"]
         ),
         "maximum_feedback_age_ms": float(config["maximum_feedback_age_ms"]),
+        "maximum_feedback_age_ms_semantics": (
+            "deprecated compatibility alias for motion_ready_feedback_max_age_ms; "
+            "not an excitation runtime abort threshold"
+        ),
+        "motion_ready_feedback_max_age_ms": float(
+            config["motion_ready_feedback_max_age_ms"]
+        ),
         "maximum_disabled_feedback_age_ms": float(
             config["maximum_disabled_feedback_age_ms"]
+        ),
+        "lower_feedback_timeout_ms": float(config["lower_feedback_timeout_ms"]),
+        "transient_feedback_invalid_recovery_ms": float(
+            config["transient_feedback_invalid_recovery_ms"]
         ),
         "connect_timeout_s": float(config["connect_timeout_s"]),
         "command_timeout_s": float(config["command_timeout_s"]),
         "state_timeout_s": float(config["state_timeout_s"]),
+        "host_state_snapshot_timeout_s": float(
+            config["host_state_snapshot_timeout_s"]
+        ),
         "timestamp_lower_source": (
             "SDK JointState.monotonic_time_ns; lower-host steady-clock timestamp for latest "
             "valid driver feedback; not device hardware time"
@@ -616,13 +663,47 @@ def build_hardware_metadata(
             "disabled_feedback_age_limit_ms": float(
                 config["maximum_disabled_feedback_age_ms"]
             ),
-            "enabled_feedback_age_limit_ms": float(config["maximum_feedback_age_ms"]),
-            "primary_fault_gate": True,
+            "motion_ready_feedback_age_limit_ms": float(
+                config["motion_ready_feedback_max_age_ms"]
+            ),
+            "legacy_maximum_feedback_age_ms": {
+                "value": float(config["maximum_feedback_age_ms"]),
+                "semantics": (
+                    "deprecated compatibility alias for pre-motion freshness; "
+                    "not used as the excitation runtime abort threshold"
+                ),
+            },
+            "lower_feedback_timeout_ms": float(config["lower_feedback_timeout_ms"]),
+            "lower_feedback_freshness_semantics": (
+                "measurements are usable only while feedback_valid is true and age is "
+                "within this audited Lower timeout"
+            ),
+            "transient_feedback_invalid_recovery_ms": float(
+                config["transient_feedback_invalid_recovery_ms"]
+            ),
+            "transient_feedback_invalid_semantics": (
+                "during excitation only, fresh-host snapshots with no primary/safety/Servo "
+                "fault may keep the command stream alive inside the audited recovery window; "
+                "unusable measurements remain flagged and are excluded from quality checks"
+            ),
+            "host_state_snapshot_timeout_s": float(
+                config["host_state_snapshot_timeout_s"]
+            ),
+            "host_state_snapshot_semantics": (
+                "upper-host timestamp_host_rx_ns age; expiration is a true state-stream "
+                "communication failure and immediate fail-safe"
+            ),
+            "primary_fault_semantics": "immediate_fail_safe",
+            "servo_reject_semantics": "immediate_fail_safe",
             "servo_state_gate": True,
+            "controlled_park_policy": (
+                "required_explicit_true_for_real_excitation; recoverable software-side "
+                "abort parks only after fresh healthy enabled feedback is reacquired"
+            ),
             "preposition_fresh_feedback_gate": True,
             "preposition_start_position_gate": True,
             "preposition_settle_velocity_gate": True,
-            "communication_timeout_s": float(config["state_timeout_s"]),
+            "blocking_state_read_timeout_s": float(config["state_timeout_s"]),
         },
         "sdk_safety_config_snapshot": safety_snapshot,
         "hardware_acceptance": {

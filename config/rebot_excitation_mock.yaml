@@ -36,14 +36,18 @@ movej_max_velocity_rad_s: [0.3141592653589793, 0.2792526803190927, 0.26179938779
 movej_max_acceleration_rad_s2: [0.6979571678725324, 0.5583308277129860, 0.6979571678725324, 0.8375835080320788, 0.8375835080320788, 1.0470230182713984]
 movej_max_jerk_rad_s3: [10.471975511965978, 10.471975511965978, 10.471975511965978, 10.471975511965978, 10.471975511965978, 10.471975511965978]
 movej_timeout_s: 60.0
+controlled_park_before_disable: true
 start_position_tolerance_rad: 0.01
 preposition_settle_velocity_tolerance_rad_s: 0.01
 
-maximum_feedback_age_ms: 100.0
+motion_ready_feedback_max_age_ms: 100.0
 maximum_disabled_feedback_age_ms: 50.0
+lower_feedback_timeout_ms: 250.0
+transient_feedback_invalid_recovery_ms: 100.0
 connect_timeout_s: 3.0
 command_timeout_s: 3.0
 state_timeout_s: 0.25
+host_state_snapshot_timeout_s: 0.25
 
 trajectory_source: frozen_replay_artifact
 trajectory_replay_mode: actual_time_quintic_v1

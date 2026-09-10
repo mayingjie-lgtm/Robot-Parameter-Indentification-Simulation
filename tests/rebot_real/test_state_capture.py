@@ -132,13 +132,13 @@ class RebotStateCaptureTest(unittest.TestCase):
             summary = analyze_capture(path)
         self.assertFalse(summary["timestamp_lower_monotonic"])
 
-    def test_feedback_invalid_becomes_nan_with_validity_flag(self) -> None:
+    def test_feedback_invalid_becomes_nan_but_preserves_age_with_validity_flag(self) -> None:
         state = MockState(feedback_valid=(False, True, True, True, True, True))
         sample = make_sample(state)
         self.assertFalse(sample.feedback_valid[0])
         self.assertTrue(math.isnan(sample.q[0]))
         self.assertTrue(math.isnan(sample.qd[0]))
-        self.assertTrue(math.isnan(sample.feedback_age_ms[0]))
+        self.assertEqual(sample.feedback_age_ms[0], state.feedback_age_ms[0])
         self.assertTrue(math.isnan(sample.effort_reported[0]))
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "capture.csv"

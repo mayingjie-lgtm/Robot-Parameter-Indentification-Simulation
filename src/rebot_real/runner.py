@@ -222,11 +222,19 @@ def load_hardware_config(
         "controlled_park_before_disable": False,
         "start_position_tolerance_rad": 0.01,
         "preposition_settle_velocity_tolerance_rad_s": 0.01,
+        # Legacy compatibility alias. New configs should use
+        # motion_ready_feedback_max_age_ms for pre-motion freshness only.
         "maximum_feedback_age_ms": 50.0,
+        "motion_ready_feedback_max_age_ms": None,
         "maximum_disabled_feedback_age_ms": None,
+        # Mirror the audited Lower production feedback policy without changing it.
+        "lower_feedback_timeout_ms": 250.0,
+        "transient_feedback_invalid_recovery_ms": 100.0,
         "connect_timeout_s": 3.0,
         "command_timeout_s": 3.0,
+        # Blocking read timeout and latest-snapshot host-age timeout are distinct.
         "state_timeout_s": 0.25,
+        "host_state_snapshot_timeout_s": None,
         "trajectory_source": "frozen_replay_artifact",
         "trajectory_replay_mode": None,
         "trajectory_hash": None,
@@ -332,12 +340,51 @@ def load_hardware_config(
     )
     for name in ("maximum_feedback_age_ms", "connect_timeout_s", "command_timeout_s", "state_timeout_s"):
         config[name] = _positive(config[name], name)
+    motion_ready_age = config["motion_ready_feedback_max_age_ms"]
+    config["motion_ready_feedback_max_age_ms"] = (
+        config["maximum_feedback_age_ms"]
+        if motion_ready_age is None
+        else _positive(motion_ready_age, "motion_ready_feedback_max_age_ms")
+    )
+    if "motion_ready_feedback_max_age_ms" in parsed and "maximum_feedback_age_ms" not in parsed:
+        config["maximum_feedback_age_ms"] = config["motion_ready_feedback_max_age_ms"]
+    if (
+        "maximum_feedback_age_ms" in parsed
+        and "motion_ready_feedback_max_age_ms" in parsed
+        and not math.isclose(
+            float(parsed["maximum_feedback_age_ms"]),
+            float(parsed["motion_ready_feedback_max_age_ms"]),
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+    ):
+        raise ValueError(
+            "maximum_feedback_age_ms is a deprecated alias for "
+            "motion_ready_feedback_max_age_ms; conflicting values are not allowed"
+        )
     disabled_age = config["maximum_disabled_feedback_age_ms"]
     config["maximum_disabled_feedback_age_ms"] = (
-        config["maximum_feedback_age_ms"]
+        config["motion_ready_feedback_max_age_ms"]
         if disabled_age is None
         else _positive(disabled_age, "maximum_disabled_feedback_age_ms")
     )
+    config["lower_feedback_timeout_ms"] = _positive(
+        config["lower_feedback_timeout_ms"], "lower_feedback_timeout_ms"
+    )
+    config["transient_feedback_invalid_recovery_ms"] = _positive(
+        config["transient_feedback_invalid_recovery_ms"],
+        "transient_feedback_invalid_recovery_ms",
+    )
+    host_snapshot_timeout = config["host_state_snapshot_timeout_s"]
+    config["host_state_snapshot_timeout_s"] = (
+        config["state_timeout_s"]
+        if host_snapshot_timeout is None
+        else _positive(host_snapshot_timeout, "host_state_snapshot_timeout_s")
+    )
+    if config["motion_ready_feedback_max_age_ms"] > config["lower_feedback_timeout_ms"]:
+        raise ValueError(
+            "motion_ready_feedback_max_age_ms must not exceed lower_feedback_timeout_ms"
+        )
 
     root = Path(repo_root) if repo_root is not None else Path(__file__).resolve().parents[2]
     output = Path(str(config["output_csv"])).expanduser()
@@ -365,6 +412,15 @@ def load_hardware_config(
         raise ValueError(
             f"excitation requires trajectory_replay_mode={TRAJECTORY_REPLAY_MODE}"
         )
+    if config["control_mode"] == "excitation" and config["allow_hardware"]:
+        if "controlled_park_before_disable" not in parsed:
+            raise ValueError(
+                "real excitation requires an explicit controlled_park_before_disable policy"
+            )
+        if config["controlled_park_before_disable"] is not True:
+            raise ValueError(
+                "real excitation requires controlled_park_before_disable=true"
+            )
     return config
 
 
@@ -787,6 +843,10 @@ class RebotHardwareRunner:
         previous_target = artifact.q_start
         trajectory_start_timestamp_ns: int | None = None
         last_trajectory_time_s: float | None = None
+        feedback_unusable_since_ns: int | None = None
+        feedback_unusable_sample_count = 0
+        feedback_recovery_event_count = 0
+        maximum_runtime_feedback_age_ms = 0.0
         command_index = 0
         while True:
             attempted_sequence = adapter.next_servo_sequence
@@ -810,11 +870,22 @@ class RebotHardwareRunner:
                 if state is None:
                     raise RebotControlError("state snapshot unavailable during excitation")
                 gate_timestamp_ns = self.monotonic_ns_fn()
-                self._validate_state(
-                    state,
-                    require_servo_active=True,
-                    current_monotonic_ns=gate_timestamp_ns,
+                was_unusable = feedback_unusable_since_ns is not None
+                feedback_unusable_since_ns, measurement_usable = (
+                    self._validate_excitation_runtime_state(
+                        state,
+                        current_monotonic_ns=gate_timestamp_ns,
+                        feedback_unusable_since_ns=feedback_unusable_since_ns,
+                    )
                 )
+                maximum_runtime_feedback_age_ms = max(
+                    maximum_runtime_feedback_age_ms,
+                    max(float(value) for value in state.feedback_age_ms),
+                )
+                if not measurement_usable:
+                    feedback_unusable_sample_count += 1
+                    if not was_unusable:
+                        feedback_recovery_event_count += 1
                 # During excitation, q_ref-q is identification/control-quality
                 # evidence only. It is recorded in q/q_cmd and summarized offline;
                 # unlike servo_hold/joint_jog it is not a runtime abort gate.
@@ -864,6 +935,17 @@ class RebotHardwareRunner:
                 )
                 envelope["trajectory_time_end_s"] = last_trajectory_time_s
                 envelope["trajectory_duration_s"] = artifact.duration_s
+                envelope["feedback_runtime"] = {
+                    "measurement_unusable_sample_count": feedback_unusable_sample_count,
+                    "transient_recovery_event_count": feedback_recovery_event_count,
+                    "maximum_feedback_age_ms": maximum_runtime_feedback_age_ms,
+                    "lower_feedback_timeout_ms": float(
+                        self.config["lower_feedback_timeout_ms"]
+                    ),
+                    "transient_feedback_invalid_recovery_ms": float(
+                        self.config["transient_feedback_invalid_recovery_ms"]
+                    ),
+                }
                 recorder.runtime_envelope_result = envelope
                 recorder.failure_result = self._excitation_failure_evidence(
                     stage=stage,
@@ -921,6 +1003,15 @@ class RebotHardwareRunner:
         envelope["trajectory_time_start_s"] = 0.0
         envelope["trajectory_time_end_s"] = artifact.duration_s
         envelope["trajectory_duration_s"] = artifact.duration_s
+        envelope["feedback_runtime"] = {
+            "measurement_unusable_sample_count": feedback_unusable_sample_count,
+            "transient_recovery_event_count": feedback_recovery_event_count,
+            "maximum_feedback_age_ms": maximum_runtime_feedback_age_ms,
+            "lower_feedback_timeout_ms": float(self.config["lower_feedback_timeout_ms"]),
+            "transient_feedback_invalid_recovery_ms": float(
+                self.config["transient_feedback_invalid_recovery_ms"]
+            ),
+        }
         recorder.runtime_envelope_result = envelope
 
         adapter.exit_servo()
@@ -1028,6 +1119,7 @@ class RebotHardwareRunner:
             ),
             "failure_observed_timestamp_ns": int(failure_observed_timestamp_ns),
             "servo_sequence": int(servo_sequence),
+            "feedback_valid": None if state is None else list(state.feedback_valid),
             "feedback_age_ms": None if state is None else list(state.feedback_age_ms),
             "state_snapshot_age_ms": (
                 None
@@ -1037,6 +1129,8 @@ class RebotHardwareRunner:
                 )
             ),
             "primary_fault_code": 0 if state is None else state.primary_fault_code,
+            "safety_state": None if state is None else state.safety_state,
+            "servo_active": None if state is None else bool(state.servo_active),
             "servo_reject_counters": counters,
             "error": f"{type(error).__name__}: {error}",
         }
@@ -1090,6 +1184,7 @@ class RebotHardwareRunner:
         position_tolerance_rad: float,
         velocity_tolerance_rad_s: float,
         label: str,
+        feedback_age_limit_key: str = "motion_ready_feedback_max_age_ms",
     ) -> CaptureSample:
         """Require three consecutive fresh idle snapshots around one MoveJ target."""
 
@@ -1114,7 +1209,11 @@ class RebotHardwareRunner:
             state = adapter.read_state()
             last = state
             try:
-                self._validate_state(state, require_servo_active=False)
+                self._validate_state(
+                    state,
+                    require_servo_active=False,
+                    feedback_age_limit_key=feedback_age_limit_key,
+                )
             except RebotControlError as exc:
                 # A single post-MoveJ UDP snapshot can still report feedback ages
                 # from the just-finished motion. Never use that stale q/qd for a
@@ -1215,6 +1314,10 @@ class RebotHardwareRunner:
             if not self.mock_backend and self.config["j1_convention"].startswith("MOCK"):
                 raise PermissionError("Mock mapping cannot authorize real joint_jog")
         if mode == "excitation":
+            if not self.mock_backend and self.config.get("controlled_park_before_disable") is not True:
+                raise PermissionError(
+                    "real excitation requires controlled_park_before_disable=true before connect"
+                )
             scope = self.config.get("joint_mapping_scope")
             if scope not in {"excitation_smoke", "excitation"}:
                 raise PermissionError(
@@ -1238,7 +1341,7 @@ class RebotHardwareRunner:
         last_mode = "unknown"
         last_safety = "unknown"
         last_age_ms = math.inf
-        enabled_age_limit = float(self.config["maximum_feedback_age_ms"])
+        enabled_age_limit = float(self.config["motion_ready_feedback_max_age_ms"])
         while True:
             state = adapter.read_state()
             # Immediately after ENABLE, the first post-command UDP frame may still
@@ -1348,12 +1451,87 @@ class RebotHardwareRunner:
                 return now_ns
             self.sleep_fn((deadline - now_ns) * 1e-9)
 
+    def _validate_excitation_runtime_state(
+        self,
+        state: CaptureSample,
+        *,
+        current_monotonic_ns: int,
+        feedback_unusable_since_ns: int | None,
+    ) -> tuple[int | None, bool]:
+        """Classify one fresh-host Servo snapshot without defeating Lower recovery."""
+
+        if int(state.primary_fault_code) != 0:
+            raise RebotControlError(f"primary fault active: {state.primary_fault_code}")
+        if state.safety_state in {"protective_stop", "fault_latched", "emergency_stop"}:
+            raise RebotControlError(f"unsafe lower safety_state={state.safety_state}")
+        if len(state.feedback_valid) != JOINT_COUNT:
+            raise RebotControlError("feedback_valid must contain six values")
+        if len(state.feedback_age_ms) != JOINT_COUNT or not all(
+            math.isfinite(value) for value in state.feedback_age_ms
+        ):
+            raise RebotControlError("feedback_age_ms feedback must contain six finite values")
+        if len(state.q) != JOINT_COUNT or len(state.qd) != JOINT_COUNT:
+            raise RebotControlError("q/qd feedback must contain six values")
+        for index, valid in enumerate(state.feedback_valid):
+            if valid and (
+                not math.isfinite(state.q[index]) or not math.isfinite(state.qd[index])
+            ):
+                raise RebotControlError(
+                    f"valid joint feedback J{index + 1} contains non-finite q/qd"
+                )
+        snapshot_age_ms = self._state_snapshot_age_ms(state, current_monotonic_ns)
+        host_timeout_ms = float(self.config["host_state_snapshot_timeout_s"]) * 1000.0
+        if snapshot_age_ms > host_timeout_ms:
+            raise RebotControlError(
+                "state snapshot stale: host receive age "
+                f"{snapshot_age_ms:.3f} ms exceeds host_state_snapshot_timeout_s="
+                f"{float(self.config['host_state_snapshot_timeout_s']):.6g}"
+            )
+        if not bool(state.servo_active):
+            raise RebotControlError("servo_active=False but expected True")
+
+        lower_timeout_ms = float(self.config["lower_feedback_timeout_ms"])
+        recovery_ms = float(self.config["transient_feedback_invalid_recovery_ms"])
+        max_age_ms = max(float(value) for value in state.feedback_age_ms)
+        measurement_usable = all(state.feedback_valid) and max_age_ms <= lower_timeout_ms
+        if measurement_usable:
+            for index, value in enumerate(state.q):
+                lower = self.config["joint_position_min_rad"][index]
+                upper = self.config["joint_position_max_rad"][index]
+                if not lower <= value <= upper:
+                    raise RebotControlError(
+                        f"feedback joint {index + 1} outside configured position limits"
+                    )
+            return None, True
+
+        # Do not grant a fresh recovery window to a snapshot that already proves
+        # the Lower freshness + grace budget has elapsed.
+        if max_age_ms > lower_timeout_ms + recovery_ms:
+            raise RebotControlError(
+                "transient feedback invalid exceeded lower recovery budget: "
+                f"max_feedback_age_ms={max_age_ms:.3f} > "
+                f"lower_feedback_timeout_ms+recovery_ms="
+                f"{lower_timeout_ms + recovery_ms:.3f}"
+            )
+        started_ns = (
+            int(current_monotonic_ns)
+            if feedback_unusable_since_ns is None
+            else int(feedback_unusable_since_ns)
+        )
+        invalid_duration_ms = (int(current_monotonic_ns) - started_ns) * 1e-6
+        if invalid_duration_ms >= recovery_ms:
+            raise RebotControlError(
+                "transient feedback invalid exceeded recovery window: "
+                f"duration_ms={invalid_duration_ms:.3f} >= {recovery_ms:.3f}"
+            )
+        return started_ns, False
+
     def _validate_state(
         self,
         state: CaptureSample,
         *,
         require_servo_active: bool | None,
-        feedback_age_limit_key: str = "maximum_feedback_age_ms",
+        feedback_age_limit_key: str = "motion_ready_feedback_max_age_ms",
         current_monotonic_ns: int | None = None,
     ) -> None:
         if not all(state.feedback_valid):
@@ -1387,11 +1565,11 @@ class RebotHardwareRunner:
             else int(current_monotonic_ns)
         )
         snapshot_age_ms = self._state_snapshot_age_ms(state, now_ns)
-        if snapshot_age_ms > float(self.config["state_timeout_s"]) * 1000.0:
+        if snapshot_age_ms > float(self.config["host_state_snapshot_timeout_s"]) * 1000.0:
             raise RebotControlError(
                 "state snapshot stale: host receive age "
-                f"{snapshot_age_ms:.3f} ms exceeds state_timeout_s="
-                f"{float(self.config['state_timeout_s']):.6g}"
+                f"{snapshot_age_ms:.3f} ms exceeds host_state_snapshot_timeout_s="
+                f"{float(self.config['host_state_snapshot_timeout_s']):.6g}"
             )
         for index, value in enumerate(state.q):
             lower = self.config["joint_position_min_rad"][index]
@@ -1600,6 +1778,7 @@ class RebotHardwareRunner:
                                             ]
                                         ),
                                         label="park",
+                                        feedback_age_limit_key="lower_feedback_timeout_ms",
                                     )
                                     result["park_status"] = "completed"
                                 result["park_final_q"] = list(final.q)
@@ -1644,9 +1823,13 @@ class RebotHardwareRunner:
         while True:
             state = adapter.read_state()
             try:
-                self._validate_state(state, require_servo_active=None)
+                self._validate_state(
+                    state,
+                    require_servo_active=None,
+                    feedback_age_limit_key="lower_feedback_timeout_ms",
+                )
             except RebotControlError as exc:
-                if str(exc).startswith("feedback stale"):
+                if self._is_recoverable_feedback_error(exc):
                     last_stale = exc
                     if self.monotonic_fn() < deadline:
                         self.sleep_fn(0.01)
@@ -1668,7 +1851,11 @@ class RebotHardwareRunner:
         last: CaptureSample | None = None
         while True:
             state = adapter.read_state()
-            self._validate_state(state, require_servo_active=None)
+            self._validate_state(
+                state,
+                require_servo_active=None,
+                feedback_age_limit_key="lower_feedback_timeout_ms",
+            )
             last = state
             if (
                 state.robot_mode == "idle"
@@ -1703,11 +1890,16 @@ class RebotHardwareRunner:
                 )
 
     @staticmethod
+    def _is_recoverable_feedback_error(cause: BaseException) -> bool:
+        message = str(cause)
+        return message.startswith("feedback stale") or message.startswith(
+            "invalid joint feedback"
+        ) or message.startswith("transient feedback invalid exceeded")
+
+    @staticmethod
     def _requires_immediate_fail_safe(cause: BaseException) -> bool:
         message = str(cause)
         markers = (
-            "invalid joint feedback",
-            "feedback stale",
             "primary fault active",
             "unsafe lower safety_state",
             "state timeout",

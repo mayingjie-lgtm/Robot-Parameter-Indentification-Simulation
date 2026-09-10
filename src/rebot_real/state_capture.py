@@ -89,14 +89,16 @@ def map_sdk_state(
     effort_reported: list[float] = []
     age_ms: list[float] = []
     for joint in range(JOINT_COUNT):
+        # Preserve Lower freshness telemetry even when the measurement itself is
+        # invalid. q/qd remain NaN sentinels so invalid data cannot masquerade as
+        # a usable identification measurement.
+        age_ms.append(float(feedback_age[joint]))
         if feedback_valid[joint]:
             q.append(float(position[joint]))
             qd.append(float(velocity[joint]))
-            age_ms.append(float(feedback_age[joint]))
         else:
             q.append(math.nan)
             qd.append(math.nan)
-            age_ms.append(math.nan)
         if feedback_valid[joint] and torque_valid[joint]:
             effort_reported.append(float(torque[joint]))
         else:

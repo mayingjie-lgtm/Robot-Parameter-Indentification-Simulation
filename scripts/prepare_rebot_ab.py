@@ -102,7 +102,16 @@ def prepare(
                       trajectory_artifact=str(artifact.path), trajectory_metadata=str(artifact.metadata_path),
                       trajectory_preview_acceptance=str(run / "preview_acceptance.yaml"),
                       allow_hardware=False, allow_motion=False, joint_mapping_verified=False,
-                      joint_mapping_scope="excitation", j1_convention="UNRESOLVED")
+                      joint_mapping_scope="excitation", j1_convention="UNRESOLVED",
+                      controlled_park_before_disable=True,
+                      motion_ready_feedback_max_age_ms=100.0,
+                      maximum_disabled_feedback_age_ms=50.0,
+                      lower_feedback_timeout_ms=250.0,
+                      transient_feedback_invalid_recovery_ms=100.0,
+                      host_state_snapshot_timeout_s=0.25)
+        # New pending excitation configs use physical names. Keep the loader's
+        # legacy maximum_feedback_age_ms alias only for historical files.
+        config.pop("maximum_feedback_age_ms", None)
         config["maximum_servo_target_delta_rad"] = float(
             qualify["maximum_servo_target_delta_rad"]
         )

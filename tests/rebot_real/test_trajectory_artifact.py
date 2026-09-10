@@ -332,12 +332,10 @@ class TrajectoryArtifactTest(unittest.TestCase):
             places=15,
         )
 
-        self.assertEqual(new_report["preview_status"], "FAIL")
+        self.assertEqual(new_report["preview_status"], "PASS")
         self.assertEqual(new_report["servo_target_delta_design_status"], "PASS")
-        self.assertIn(
-            "continuous quintic collision precheck is not PASS",
-            new_report["failures"],
-        )
+        self.assertEqual(new_report["continuous_quintic_collision_precheck"], "PASS")
+        self.assertEqual(new_report["failures"], [])
         self.assertLessEqual(
             max(
                 item["servo_target_delta_abs_max"]
@@ -893,6 +891,17 @@ class TrajectoryArtifactTest(unittest.TestCase):
                 follow_servo_targets=True,
                 monotonic_ns_fn=monotonic_ns,
             )
+            # This test uses the canonical identity mapping from the Mock config.
+            # Supply the fallback Mock park target in that same convention; the
+            # production SDK park target is mapped by RebotControlAdapter.
+            fake.movej_park_policy["target_position_rad"] = (
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                math.pi / 2,
+            )
             metadata = RebotHardwareRunner(
                 config,
                 repo_root=REPO_ROOT,
@@ -912,8 +921,14 @@ class TrajectoryArtifactTest(unittest.TestCase):
                 ],
                 0,
             )
-            self.assertEqual(fake.movej_targets, [artifact.q_start])
+            self.assertEqual(fake.movej_targets[0], artifact.q_start)
+            self.assertEqual(
+                fake.movej_targets[1],
+                fake.movej_park_policy["target_position_rad"],
+            )
             self.assertEqual(metadata["preposition"]["movej_command_count"], 1)
+            self.assertEqual(metadata["shutdown"]["park_status"], "completed")
+            self.assertEqual(metadata["shutdown"]["park_movej_command_count"], 1)
             self.assertEqual(len(fake.servo_targets), 3002)
             self.assertEqual(fake.servo_targets[0], artifact.q_start)
             self.assertEqual(fake.servo_targets[1:], expected)
