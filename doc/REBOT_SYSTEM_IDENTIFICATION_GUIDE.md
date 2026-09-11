@@ -382,15 +382,27 @@ B raw
 
 只有需要单独定位底层 runner/SDK 行为时，再使用 `scripts/run_rebot_hardware.py` 等高级工具。不要把调试命令重新变成正式操作流程。
 
-## 14. frozen trajectory 更换流程
+## 14. frozen trajectory 生成与更换流程
 
-若未来重新设计 A/B excitation，不要直接编辑已有 trajectory CSV。正确流程：
+仓库可以从 C++ Fourier 源确定性重建当前 A/B trajectory，不需要向项目负责人索取轨迹文件。完成 `build_rebot/` 构建后，在仓库根目录执行：
 
-1. 从可信系数/生成器导出新的 frozen trajectory artifact；
+```bash
+python3 scripts/prepare_rebot_ab.py \
+  --build-directory build_rebot \
+  --output-directory results/rebot_real_ab_generated
+```
+
+输出目录必须为新目录。脚本会生成 A/B 各自的 `coefficients.csv`、`trajectory.csv`、`trajectory.meta.yaml`、`preview_report.yaml`、`preview.mp4` 和默认未授权的 `preview_acceptance.yaml`，并在顶层保存 `qualification.snapshot.yaml` 与 `manifest.yaml`。
+
+无显示环境时可加 `--skip-video` 进行纯数值检查，但该模式不会产生可授权的 preview acceptance。历史 measured timing CSV 不存在时，脚本会明确退回 nominal/alternating timing profiles 并将实际配置写入 snapshot；这不替代人工预览和现场安全确认。
+
+生成后的正确验收流程：
+
+1. 确认 A/B 均从可信 C++ 生成器导出，且 trajectory SHA-256 不同；
 2. 做连续 quintic 数值安全和 collision qualification；
 3. 用 exact frozen excitation 生成 preview MP4；
 4. 人工观看；
-5. 对 matching trajectory/report/MP4 hashes 写入 acceptance；
+5. 在 `preview_acceptance.yaml` 中填写 operator/review date/notes，并仅对 matching trajectory/report/MP4 hashes 将 `accepted_for_hardware` 设为 true；
 6. 再把新的 `artifact`、`metadata`、`preview_acceptance` 三个路径填入 `config/rebot_real_ab.yaml`；
 7. 重新执行 `--preflight-only`；
 8. 只有 preflight PASS 后才允许现场实验。

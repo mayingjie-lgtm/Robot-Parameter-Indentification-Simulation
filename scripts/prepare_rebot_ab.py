@@ -10,7 +10,12 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-from rebot_real.trajectory_artifact import load_replay_artifact, qualify_replay_artifact, write_preview_outputs
+from rebot_real.trajectory_artifact import (
+    load_replay_artifact,
+    qualify_replay_artifact,
+    sha256_file,
+    write_preview_outputs,
+)
 
 def _renderer_env() -> dict[str, str]:
     env = dict(os.environ)
@@ -25,7 +30,7 @@ def _renderer_env() -> dict[str, str]:
 
 
 SOURCES = {
-    "A": (20260826, 6, "86a5481c0c2459bb6e3f01d0aee4c247f4f0ed71aa444f77b6d1458c1f7cd529"),
+    "A": (20260918, 18, "d7c492ce56d7f7fb02b001bf9505c78679fa5f8a8f2f9488e4b5234a96fe9289"),
     "B": (20260829, 21, "67ccf33c832951fe72e4d81928727fcf7c2580f0600f5ef33e046761ce810d31"),
 }
 
@@ -43,16 +48,24 @@ def prepare(
     qualify = yaml.safe_load((ROOT / "config/rebot_trajectory_preview.yaml").read_text())
     qualify["expected_sample_rate_hz"] = float(sample_rate_hz)
     qualify["expected_sample_count"] = int(round(30.0 * sample_rate_hz)) + 1
+    measured_timing = qualify.get("measured_timing_csv")
+    if measured_timing and not (ROOT / measured_timing).is_file():
+        qualify.pop("measured_timing_csv")
+        print(
+            "Historical measured timing CSV is unavailable; qualification will "
+            "use the built-in nominal and alternating timing profiles."
+        )
+    qualification_snapshot = output / "qualification.snapshot.yaml"
+    qualification_snapshot.write_text(
+        yaml.safe_dump(qualify, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
     manifest = dict(status="preparing", hardware_authorized=False, candidates={})
     for label, (seed, attempt, coefficient_hash) in SOURCES.items():
         run = output / label
         run.mkdir()
-        frozen_coefficients = ROOT / "results" / "rebot_real_ab" / label / "coefficients.csv"
-        if not frozen_coefficients.is_file():
-            raise FileNotFoundError(f"frozen coefficient artifact is missing: {frozen_coefficients}")
-        shutil.copyfile(frozen_coefficients, run / "coefficients.csv")
         subprocess.run([str(build / "rebot_trajectory_exporter"),
-                        "--coefficients", str(run / "coefficients.csv"),
+                        "--generate-coefficients", str(run / "coefficients.csv"),
                         "--output", str(run / "trajectory.csv"), "--metadata", str(run / "trajectory.meta.yaml"),
                         "--seed", str(seed), "--accepted-attempt", str(attempt),
                         "--expected-coefficient-sha256", coefficient_hash,
@@ -60,6 +73,12 @@ def prepare(
                        cwd=ROOT, check=True)
         artifact = load_replay_artifact(run / "trajectory.csv", run / "trajectory.meta.yaml")
         report = qualify_replay_artifact(artifact, qualify)
+        report["git_head_at_preview"] = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+        ).strip()
+        report["trajectory_metadata_sha256"] = sha256_file(run / "trajectory.meta.yaml")
+        report["qualification_config_file"] = str(qualification_snapshot.resolve())
+        report["qualification_config_sha256"] = sha256_file(qualification_snapshot)
         if render:
             subprocess.run([str(build / "rebot_trajectory_renderer"), "--input", str(artifact.path),
                             "--output", str(run / "preview.mp4")], cwd=ROOT,
@@ -86,13 +105,9 @@ def prepare(
                 yaml.safe_dump(manifest, sort_keys=False)
             )
             raise ValueError(f"{label} qualification failed: {report['failures']}")
-        smoke_template_path = (
-            ROOT / "results" / "rebot_real_ab" / label / "hardware.smoke.yaml"
-        )
+        smoke_template_path = ROOT / "config" / "rebot_excitation_mock.yaml"
         if not smoke_template_path.is_file():
-            raise FileNotFoundError(
-                f"validated historical smoke config is missing: {smoke_template_path}"
-            )
+            raise FileNotFoundError(f"Mock template is missing: {smoke_template_path}")
         config = yaml.safe_load(smoke_template_path.read_text())
         config.update(control_mode="excitation", control_rate_hz=float(sample_rate_hz),
                       duration_s=30.0, max_samples=None,
@@ -115,7 +130,8 @@ def prepare(
         config["maximum_servo_target_delta_rad"] = float(
             qualify["maximum_servo_target_delta_rad"]
         )
-        # Keep real template limits unresolved; do not copy permissive Mock limits.
+        # This diagnostic template stays fully unauthorized. Formal real limits
+        # continue to come only from config/rebot_real_ab.yaml.
         (run / "hardware.pending.yaml").write_text(yaml.safe_dump(config, sort_keys=False))
         manifest["candidates"][label] = dict(seed=seed, accepted_attempt=attempt,
                                              coefficient_sha256=coefficient_hash, trajectory_sha256=artifact.sha256,
